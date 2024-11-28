@@ -1,0 +1,27 @@
+services:
+  musabotti:
+    image: musabotti:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    environment:
+      - DISCORD_TOKEN
+      - DISCORD_APP_ID
+      - PREFIX
+      - TIMEOUT_DURATION
+      - LAVALINK_NAME
+      - LAVALINK_URL
+      - LAVALINK_AUTH
+    restart: unless-stopped
+    depends_on:
+      - lavalink
+  lavalink:
+    image: lavalink:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.lavalink
+    ports:
+      - 6969:6969
+    restart: unless-stopped
+    volumes:
+      - ./lavacord/application.yml:/opt/Lavalink/application.yml

@@ -1,0 +1,19 @@
+FROM openjdk:24-oracle
+
+RUN microdnf install -y \
+    curl \
+    wget \
+    && microdnf clean all
+
+# Set the working directory inside the container
+WORKDIR /lavalink
+
+# Copy the source code into the container
+COPY lavacord/application.yml /lavalink
+
+# Get the latest Lavalink version and download the JAR
+RUN VER=$(curl --silent -qI https://github.com/lavalink-devs/Lavalink/releases/latest | awk -F '/' '/^location/ {print  substr($NF, 1, length($NF)-1)}') \
+    && wget https://github.com/lavalink-devs/Lavalink/releases/download/$VER/Lavalink.jar
+
+# Command to run Lavalink
+CMD ["java", "-jar", "Lavalink.jar", "--enable-native-access=ALL-UNNAMED"]

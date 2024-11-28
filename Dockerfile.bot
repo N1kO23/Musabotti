@@ -1,0 +1,15 @@
+FROM node:21-alpine3.18
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy the source code into the container
+COPY src /app
+COPY package.json /app/
+COPY tsconfig.json /app/
+
+# Install dependencies using Yarn
+RUN yarn
+
+# Set the default command to run your application in development mode
+CMD ["yarn", "run", "docker"]

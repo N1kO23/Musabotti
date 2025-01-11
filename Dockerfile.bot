@@ -6,6 +6,7 @@ WORKDIR /app
 # Copy the source code into the container
 COPY src /app
 COPY package.json /app/
+COPY yarn.lock /app/
 COPY tsconfig.json /app/
 
 # Install dependencies using Yarn

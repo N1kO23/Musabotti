@@ -1,5 +1,24 @@
-import { Client, Collection, Message, ReactionUserManager, TextChannel } from "discord.js";
-import { Band, ChannelMixSettings, DistortionSettings, FreqSettings, KaraokeSettings, LowPassSettings, Node, Player, RotationSettings, Shoukaku, TimescaleSettings, Track } from "shoukaku";
+import {
+  Client,
+  Collection,
+  Message,
+  ReactionUserManager,
+  TextChannel,
+} from "discord.js";
+import {
+  Band,
+  ChannelMixSettings,
+  DistortionSettings,
+  FreqSettings,
+  KaraokeSettings,
+  LowPassSettings,
+  Node,
+  Player,
+  RotationSettings,
+  Shoukaku,
+  TimescaleSettings,
+  Track,
+} from "shoukaku";
 import { Context } from "../classes/context";
 import { createNowPlayingEmbed, shuffleArray } from "../util";
 
@@ -30,9 +49,10 @@ export async function getPlayer(
     params.context?.member?.voice.channelId ?? params.voiceChannelId;
   if (!channelId) throw new Error("No voice channel id found");
 
-  const newPlayer = params.context?.client ? new PlayerManager(guildId, shoukaku, params.context?.client) : undefined;
-  if (!newPlayer)
-    throw new Error('Error at player instance creation!');
+  const newPlayer = params.context?.client
+    ? new PlayerManager(guildId, shoukaku, params.context?.client)
+    : undefined;
+  if (!newPlayer) throw new Error("Error at player instance creation!");
 
   try {
     await newPlayer.createPlayer(channelId);
@@ -88,7 +108,8 @@ class PlayerManager {
   private loop: boolean = false;
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
-  private timeoutDuration: number = Number.parseInt(process.env.TIMEOUT_DURATION ?? '') ?? 360000;
+  private timeoutDuration: number =
+    Number.parseInt(process.env.TIMEOUT_DURATION ?? "") ?? 360000;
   private skipping: boolean = false;
 
   /**
@@ -102,12 +123,11 @@ class PlayerManager {
     this.client = client;
   }
 
-
   startMonitoring() {
     console.log(`Bot idling on server ${this.guildId}`);
     this.timeoutId = setTimeout(() => {
       if (this.currentTrack === undefined) {
-        this.removePlayer()
+        this.removePlayer();
         console.log(`Bot disconnected due to idle on server ${this.guildId}`);
       }
     }, this.timeoutDuration);
@@ -141,11 +161,17 @@ class PlayerManager {
       }
       if (this.queue.length > 0)
         this.nextTrack({ noReplace: true, sendEmbed: true });
+      else {
+        const guild = this.client.guilds.cache.get(this.guildId);
+        if (guild) {
+          guild.members.me?.setNickname(null);
+        }
+      }
     });
 
-    this.player.on('start', (data) => {
+    this.player.on("start", (data) => {
       console.log(data.track.info);
-    })
+    });
 
     this.player.on("closed", async () => {
       await this.removePlayer();
@@ -161,8 +187,7 @@ class PlayerManager {
   }
 
   async togglePausePlayer() {
-    if (!this.player)
-      throw new Error("The player doesn't exist");
+    if (!this.player) throw new Error("The player doesn't exist");
     await this.player.setPaused(!this.player.paused);
     return this.player.paused;
   }
@@ -196,11 +221,19 @@ class PlayerManager {
 
   async skipSong() {
     this.skipping = true;
-    await this.nextTrack({ noReplace: false, forceSkip: true, sendEmbed: true });
+    await this.nextTrack({
+      noReplace: false,
+      forceSkip: true,
+      sendEmbed: true,
+    });
     this.skipping = false;
   }
 
-  async nextTrack(options: { noReplace?: boolean, forceSkip?: boolean, sendEmbed?: boolean }) {
+  async nextTrack(options: {
+    noReplace?: boolean;
+    forceSkip?: boolean;
+    sendEmbed?: boolean;
+  }) {
     if (!this.player) {
       throw new Error("The player doesn't exist");
     }
@@ -213,16 +246,25 @@ class PlayerManager {
     }
     this.stopMonitoring();
     if (this.currentTrack.queuedFromChannelId && options.sendEmbed) {
-      const channel = this.client.channels.cache.get(this.currentTrack.queuedFromChannelId) as TextChannel;
+      const channel = this.client.channels.cache.get(
+        this.currentTrack.queuedFromChannelId
+      ) as TextChannel;
       if (channel?.isTextBased()) {
         const embed = createNowPlayingEmbed(this.currentTrack.track);
         await channel.send({ embeds: [embed] });
       }
+      if (channel?.guild?.members.me && this.currentTrack.track.info?.title) {
+        await channel.guild.members.me.setNickname(
+          this.currentTrack.track.info.title
+        );
+      }
     }
-    await this.player.playTrack({
-      track: { encoded: this.currentTrack.track.encoded },
-    },
-      options.noReplace ?? false,
+
+    await this.player.playTrack(
+      {
+        track: { encoded: this.currentTrack.track.encoded },
+      },
+      options.noReplace ?? false
     );
     return this.currentTrack;
   }
@@ -314,10 +356,10 @@ export class TrackExt {
   queuedFromChannelId?: string;
 
   /**
- * Creates a new extended Track instance that adds additional information alongside the track
- * @param track The track itself
- * @param queuedFromChannelId Optional field that contains a channel id where the track was queued from
- */
+   * Creates a new extended Track instance that adds additional information alongside the track
+   * @param track The track itself
+   * @param queuedFromChannelId Optional field that contains a channel id where the track was queued from
+   */
   constructor(track: Track, queuedFromChannelId?: string) {
     this.track = track;
     this.queuedFromChannelId = queuedFromChannelId;

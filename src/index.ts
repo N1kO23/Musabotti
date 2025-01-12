@@ -83,6 +83,7 @@ shoukaku.on(Events.ClientReady, async () => {
 
   client.guilds.cache.map(async (guild) => {
     await registerSlashCommands(guild);
+    await guild.members.me?.setNickname(null);
   });
 });
 

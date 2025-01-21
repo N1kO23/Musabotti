@@ -20,7 +20,7 @@ import {
   Track,
 } from "shoukaku";
 import { Context } from "../classes/context";
-import { createNowPlayingEmbed, shuffleArray } from "../util";
+import { createNowPlayingEmbed, shuffleArray, truncateString } from "../util";
 
 const players = new Collection<string, PlayerManager>();
 
@@ -255,7 +255,7 @@ class PlayerManager {
       }
       if (channel?.guild?.members.me && this.currentTrack.track.info?.title) {
         await channel.guild.members.me.setNickname(
-          this.currentTrack.track.info.title
+          truncateString(this.currentTrack.track.info.title)
         );
       }
     }

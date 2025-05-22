@@ -5,7 +5,7 @@
     "discord.js": "^14.15.3",
     "dotenv": "^16.3.1",
     "get-image-colors": "^4.0.1",
-    "shoukaku": "^4.1.1",
+    "shoukaku": "^4.0.1",
     "spotify-url-info": "^3.2.6",
     "sqlite": "^5.0.1",
     "sqlite3": "^5.1.6",

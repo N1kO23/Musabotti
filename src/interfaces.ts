@@ -3,7 +3,7 @@ import {
   Client,
   GuildMember,
   Interaction,
-  InteractionCallbackResponse,
+  InteractionResponse,
   Message,
 } from "discord.js";
 import { Shoukaku } from "shoukaku";
@@ -42,7 +42,7 @@ export interface IContext {
   interaction?: Interaction;
   reply: (
     mesg: string
-  ) => Promise<Message<boolean> | InteractionCallbackResponse>;
+  ) => Promise<Message<boolean> | InteractionResponse<boolean>>;
 }
 
 export enum CommandTypes {

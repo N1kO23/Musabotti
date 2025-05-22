@@ -6,7 +6,7 @@ import {
   Guild,
   GuildMember,
   Interaction,
-  InteractionResponse,
+  InteractionCallbackResponse,
   Message,
   MessagePayload,
   MessageReplyOptions,
@@ -44,7 +44,7 @@ export class Context implements IContext {
 
   async reply(
     options: any
-  ): Promise<Message<boolean> | InteractionResponse<boolean>> {
+  ): Promise<Message<boolean> | InteractionCallbackResponse> {
     if (this.message) {
       return this.message.reply(options);
     } else if (this.interaction && this.interaction.isChatInputCommand()) {

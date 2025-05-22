@@ -47,8 +47,8 @@ class Command implements ICommand {
     const trol = result.data as Track | Playlist;
 
     const isPlaylist = (obj: any): obj is Playlist => {
-      return 'tracks' in obj;
-    }
+      return "tracks" in obj;
+    };
 
     if (isPlaylist(trol)) {
       const embed = createPlaylistEmbed(trol.tracks);
@@ -65,7 +65,9 @@ class Command implements ICommand {
       }
       context.reply({ embeds: [embed] });
     } else {
-      const metadata = Array.isArray(trol) ? trol[0] as Track : trol as Track;
+      const metadata = Array.isArray(trol)
+        ? (trol[0] as Track)
+        : (trol as Track);
 
       if (!metadata) {
         context.reply("The song was not found");

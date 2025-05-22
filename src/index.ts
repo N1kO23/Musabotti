@@ -140,7 +140,7 @@ client.on(Events.MessageCreate, async (message) => {
       try {
         const parsedArgs = commandInstance.parseArgs(args);
         try {
-          await commandInstance.execute(shoukaku, client, context, parsedArgs);
+          commandInstance.execute(shoukaku, client, context, parsedArgs);
         } catch (error) {
           message.reply(error?.toString() ?? "Error executing command");
           console.error(error);
@@ -183,12 +183,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         context,
       });
       try {
-        await commandInstance.execute(
-          shoukaku,
-          client,
-          context,
-          args as IArgument[]
-        );
+        commandInstance.execute(shoukaku, client, context, args as IArgument[]);
       } catch (error) {
         context.reply(error?.toString() ?? "Error executing command");
         console.error(error);

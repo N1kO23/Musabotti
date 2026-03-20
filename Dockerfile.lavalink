@@ -1,9 +1,9 @@
-FROM openjdk:24-oracle
+FROM openjdk:26-ea-slim-trixie
 
-RUN microdnf install -y \
+RUN apt update && apt install -y \
     curl \
-    wget \
-    && microdnf clean all
+    wget 
+#    && microdnf clean all
 
 # Set the working directory inside the container
 WORKDIR /lavalink

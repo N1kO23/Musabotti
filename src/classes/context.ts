@@ -6,10 +6,10 @@ import {
   Guild,
   GuildMember,
   Interaction,
-  InteractionResponse,
   Message,
   MessagePayload,
   MessageReplyOptions,
+  InteractionCallbackResponse,
 } from "discord.js";
 import { IContext } from "../interfaces";
 
@@ -43,8 +43,8 @@ export class Context implements IContext {
   }
 
   async reply(
-    options: any
-  ): Promise<Message<boolean> | InteractionResponse<boolean>> {
+    options: any,
+  ): Promise<Message<boolean> | InteractionCallbackResponse<boolean>> {
     if (this.message) {
       return this.message.reply(options);
     } else if (this.interaction && this.interaction.isChatInputCommand()) {

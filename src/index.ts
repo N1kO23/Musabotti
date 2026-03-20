@@ -53,7 +53,7 @@ const mappedCommands = commands.map((command) => ({
 }));
 
 const uniqueCommands = Array.from(
-  new Set(mappedCommands.map((obj) => obj.name))
+  new Set(mappedCommands.map((obj) => obj.name)),
 ).map((name) => {
   return mappedCommands.find((obj) => obj.name === name);
 });
@@ -75,7 +75,7 @@ const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), Nodes);
 shoukaku.on(Events.Error, (_, error) => console.error(error));
 
 // Logged on successfully
-shoukaku.on(Events.ClientReady, async () => {
+shoukaku.on("ready", async () => {
   console.log("ready!");
   client.user?.setActivity(`${prefix}help`, {
     type: ActivityType.Listening,
@@ -83,7 +83,7 @@ shoukaku.on(Events.ClientReady, async () => {
 
   client.guilds.cache.map(async (guild) => {
     await registerSlashCommands(guild);
-    await guild.members.me?.setNickname(null);
+    // await guild.members.me?.setNickname(null);
   });
 });
 
@@ -102,8 +102,8 @@ client.on(Events.GuildDelete, async (guild) => {
     await rest.delete(
       Routes.applicationGuildCommands(
         process.env.DISCORD_APP_ID ?? "",
-        guild.id
-      )
+        guild.id,
+      ),
     );
     console.log(`Slash commands deleted successfully for guild ${guild.name}!`);
   } catch (error) {
@@ -160,6 +160,15 @@ client.on(Events.MessageCreate, async (message) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isCommand()) return;
+  if (!interaction.guildId) {
+    interaction.reply("Commands can only be used in a server!");
+    return;
+  }
+
+  if (!interaction.isChatInputCommand()) {
+    interaction.reply("Only chat input commands are supported!");
+    return;
+  }
 
   const command = interaction.commandName;
   const args = interaction.options.data;
@@ -203,12 +212,12 @@ const registerSlashCommands = async (guild: Guild) => {
     await rest.put(
       Routes.applicationGuildCommands(
         process.env.DISCORD_APP_ID ?? "",
-        guild.id
+        guild.id,
       ),
-      { body: uniqueCommands }
+      { body: uniqueCommands },
     );
     console.log(
-      `Slash commands registered successfully for guild ${guild.name}!`
+      `Slash commands registered successfully for guild ${guild.name}!`,
     );
   } catch (error) {
     console.error("Failed to register slash commands:", error);

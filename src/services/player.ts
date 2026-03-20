@@ -37,7 +37,7 @@ export async function getPlayer(
     guildId?: string;
     context?: Context;
     noCreate?: boolean;
-  }
+  },
 ) {
   const guildId = params.context?.member?.guild.id ?? params.guildId;
   if (!guildId) throw new Error("No guild id found");
@@ -55,8 +55,19 @@ export async function getPlayer(
   if (!newPlayer) throw new Error("Error at player instance creation!");
 
   try {
-    await newPlayer.createPlayer(channelId);
-    players.set(guildId, newPlayer);
+    const channel =
+      params.context?.client.channels.cache.get(channelId) ??
+      (await params.context?.client.channels.fetch(channelId));
+    if (!channel || !channel.isVoiceBased())
+      throw new Error("The channel is not a valid voice channel");
+
+    const guild =
+      params.context?.client.guilds.cache.get(guildId) ??
+      (await params.context?.client.guilds.fetch(guildId));
+    if (!guild) throw new Error("No guild found for the given id");
+
+    await newPlayer.createPlayer(channel.id);
+    players.set(guild.id, newPlayer);
     return newPlayer;
   } catch (error: any) {
     throw new Error(error.toString());
@@ -90,7 +101,7 @@ export async function removePlayer(params: {
 export async function queueTrack(
   shoukaku: Shoukaku,
   track: Track,
-  context: Context
+  context: Context,
 ) {
   const channel = context.channelId;
   if (!channel) throw new Error("No channel id found!");
@@ -108,8 +119,7 @@ class PlayerManager {
   private loop: boolean = false;
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
-  private timeoutDuration: number =
-    Number.parseInt(process.env.TIMEOUT_DURATION ?? "") ?? 360000;
+  private timeoutDuration: number = 30000;
   private skipping: boolean = false;
 
   /**
@@ -126,10 +136,10 @@ class PlayerManager {
   startMonitoring() {
     console.log(`Bot idling on server ${this.guildId}`);
     this.timeoutId = setTimeout(() => {
-      if (this.currentTrack === undefined) {
-        this.removePlayer();
-        console.log(`Bot disconnected due to idle on server ${this.guildId}`);
-      }
+      console.log("Idle finished.. Where we at??");
+
+      this.removePlayer();
+      console.log(`Bot disconnected due to idle on server ${this.guildId}`);
     }, this.timeoutDuration);
   }
 
@@ -147,10 +157,14 @@ class PlayerManager {
    */
   async createPlayer(channelId: string) {
     if (this.player) return;
+    console.log(
+      `Creating player for guild ${this.guildId} in channel ${channelId}`,
+    );
     this.player = await this.shoukaku.joinVoiceChannel({
       guildId: this.guildId,
       channelId,
       shardId: 0, // if unsharded it will always be zero (depending on your library implementation)
+      deaf: true,
     });
 
     this.player.on("end", (reason) => {
@@ -165,6 +179,7 @@ class PlayerManager {
         const guild = this.client.guilds.cache.get(this.guildId);
         if (guild) {
           guild.members.me?.setNickname(null);
+          this.startMonitoring();
         }
       }
     });
@@ -247,24 +262,24 @@ class PlayerManager {
     this.stopMonitoring();
     if (this.currentTrack.queuedFromChannelId && options.sendEmbed) {
       const channel = this.client.channels.cache.get(
-        this.currentTrack.queuedFromChannelId
+        this.currentTrack.queuedFromChannelId,
       ) as TextChannel;
       if (channel?.isTextBased()) {
         const embed = createNowPlayingEmbed(this.currentTrack.track);
         await channel.send({ embeds: [embed] });
       }
-      if (channel?.guild?.members.me && this.currentTrack.track.info?.title) {
-        await channel.guild.members.me.setNickname(
-          truncateString(this.currentTrack.track.info.title)
-        );
-      }
+      // if (channel?.guild?.members.me && this.currentTrack.track.info?.title) {
+      //   await channel.guild.members.me.setNickname(
+      //     truncateString(this.currentTrack.track.info.title)
+      //   );
+      // }
     }
 
     await this.player.playTrack(
       {
         track: { encoded: this.currentTrack.track.encoded },
       },
-      options.noReplace ?? false
+      options.noReplace ?? false,
     );
     return this.currentTrack;
   }

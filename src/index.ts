@@ -224,4 +224,6 @@ const registerSlashCommands = async (guild: Guild) => {
   }
 };
 
+export const getShoukakuInstance = () => shoukaku;
+
 client.login(process.env.DISCORD_TOKEN);

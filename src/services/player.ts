@@ -74,6 +74,12 @@ export async function getPlayer(
   }
 }
 
+export const getPlayerInstance = (guildId: string) => {
+  const player = players.get(guildId);
+  if (!player) throw new Error("No player found for the given guild id");
+  return player;
+};
+
 export async function removePlayer(params: {
   guildId?: string;
   context?: Context;
@@ -363,6 +369,49 @@ class PlayerManager {
       throw new Error("The player doesn't exist");
     }
     await this.player.clearFilters();
+  }
+
+  async destroy() {
+    if (!this.player) {
+      throw new Error("The player doesn't exist");
+    }
+    await this.player.destroy();
+    players.delete(this.guildId);
+  }
+
+  getCurrentTrack() {
+    return this.currentTrack;
+  }
+
+  getPlayerInstance() {
+    if (!this.player) {
+      throw new Error("The player doesn't exist");
+    }
+    return this.player;
+  }
+
+  getPlayerState() {
+    if (!this.player) {
+      throw new Error("The player doesn't exist");
+    }
+    return {
+      paused: this.player.paused,
+      position: this.player.position,
+      volume: this.player.filters?.volume ?? 100,
+      timescale: this.player.filters?.timescale,
+      equalizer: this.player.filters?.equalizer,
+      karaoke: this.player.filters?.karaoke,
+      tremolo: this.player.filters?.tremolo,
+      vibrato: this.player.filters?.vibrato,
+      distortion: this.player.filters?.distortion,
+      rotation: this.player.filters?.rotation,
+      channelMix: this.player.filters?.channelMix,
+      lowPass: this.player.filters?.lowPass,
+    };
+  }
+
+  getGuildId() {
+    return this.guildId;
   }
 }
 

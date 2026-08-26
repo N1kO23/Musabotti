@@ -32,6 +32,8 @@ export interface IArgument {
 
 export enum CONDITIONS {
   SameVoice,
+  PlayerExists,
+  QueueNotEmpty,
 }
 
 export interface IContext {

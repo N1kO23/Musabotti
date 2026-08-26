@@ -29,3 +29,16 @@ export const timeConvert = (time: number): string => {
 
   return result;
 };
+
+export const timeConvert2 = (milliseconds: number): string => {
+  const seconds = Math.floor((milliseconds / 1000) % 60);
+  const minutes = Math.floor((milliseconds / (1000 * 60)) % 60);
+  const hours = Math.floor((milliseconds / (1000 * 60 * 60)) % 24);
+
+  const hoursStr = hours > 0 ? `${hours}:` : "";
+  const minutesStr =
+    hours > 0 ? String(minutes).padStart(2, "0") : String(minutes);
+  const secondsStr = String(seconds).padStart(2, "0");
+
+  return `${hoursStr}${minutesStr}:${secondsStr}`;
+};

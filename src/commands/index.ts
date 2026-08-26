@@ -12,8 +12,29 @@ import Loop from "./loop";
 import Pause from "./pause";
 import Shuffle from "./shuffle";
 import Seek from "./seek";
+import Lofi from "./lofi";
+import Nightcore from "./nightcore";
+import Hardcore from "./hardcore";
 
-let commandClasses = [Disconnect, Invite, Play, Skip, Help, Queue, Volume, ClearFilters, Timescale, Bassboost, Loop, Pause, Shuffle, Seek];
+let commandClasses = [
+  Disconnect,
+  Invite,
+  Play,
+  Skip,
+  Help,
+  Queue,
+  Volume,
+  ClearFilters,
+  Timescale,
+  Bassboost,
+  Loop,
+  Pause,
+  Shuffle,
+  Seek,
+  Lofi,
+  Nightcore,
+  Hardcore,
+];
 
 const getCommands = () => {
   const commands = commandClasses.map((command) => new command());

@@ -1,4 +1,9 @@
-FROM node:21-alpine3.18
+FROM node:24-alpine
+
+# ffmpeg powers audio decoding/filtering; no native build tools are needed
+# since all other dependencies (voice, ytdl, opus encoding) are pure JS/WASM
+RUN apk add --no-cache ffmpeg
+RUN corepack enable
 
 # Set the working directory inside the container
 WORKDIR /app

@@ -13,6 +13,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the Musabotti image
-        run: docker build . --file Dockerfile.bot --tag musabotti:$(date +%s)
-      - name: Build the Lavalink image
-        run: docker build . --file Dockerfile.lavalink --tag lavalink:$(date +%s)
+        run: docker build . --tag musabotti:$(date +%s)

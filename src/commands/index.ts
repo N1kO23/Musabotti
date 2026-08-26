@@ -1,55 +1,48 @@
-import Play from "./play";
-import Disconnect from "./disconnect";
-import Invite from "./invite";
-import Skip from "./skip";
-import Help from "./help";
-import Queue from "./queue";
-import Volume from "./volume";
-import ClearFilters from "./clearFilters";
-import Timescale from "./timescale";
-import Bassboost from "./bassboost";
-import Loop from "./loop";
-import Pause from "./pause";
-import Shuffle from "./shuffle";
-import Seek from "./seek";
-import Lofi from "./lofi";
-import Nightcore from "./nightcore";
-import Hardcore from "./hardcore";
+import play from "./play";
+import disconnect from "./disconnect";
+import invite from "./invite";
+import skip from "./skip";
+import help from "./help";
+import queue from "./queue";
+import volume from "./volume";
+import clearFilters from "./clearFilters";
+import timescale from "./timescale";
+import bassboost from "./bassboost";
+import loop from "./loop";
+import pause from "./pause";
+import shuffle from "./shuffle";
+import seek from "./seek";
+import lofi from "./lofi";
+import nightcore from "./nightcore";
+import hardcore from "./hardcore";
+import { ICommand } from "../interfaces";
 
-let commandClasses = [
-  Disconnect,
-  Invite,
-  Play,
-  Skip,
-  Help,
-  Queue,
-  Volume,
-  ClearFilters,
-  Timescale,
-  Bassboost,
-  Loop,
-  Pause,
-  Shuffle,
-  Seek,
-  Lofi,
-  Nightcore,
-  Hardcore,
+const commands: ICommand[] = [
+  disconnect,
+  invite,
+  play,
+  skip,
+  help,
+  queue,
+  volume,
+  clearFilters,
+  timescale,
+  bassboost,
+  loop,
+  pause,
+  shuffle,
+  seek,
+  lofi,
+  nightcore,
+  hardcore,
 ];
 
-const getCommands = () => {
-  const commands = commandClasses.map((command) => new command());
-  return commands;
-};
+const getCommands = () => commands;
 
-const getCommandNamesAndDescriptions = () => {
-  const commands = commandClasses.map((command) => {
-    const temp = new command();
-    return {
-      name: temp.commandName,
-      desc: temp.commandDescription,
-    };
-  });
-  return commands;
-};
+const getCommandNamesAndDescriptions = () =>
+  commands.map((command) => ({
+    name: command.data.name,
+    description: command.data.description,
+  }));
 
 export { getCommands, getCommandNamesAndDescriptions };

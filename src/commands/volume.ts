@@ -1,53 +1,36 @@
-import { Client, EmbedBuilder, Message } from "discord.js";
-import { Shoukaku } from "shoukaku";
-import { CONDITIONS, CommandTypes, IArgument, ICommand } from "../interfaces";
+import { EmbedBuilder, SlashCommandBuilder } from "discord.js";
+import { CONDITIONS, ICommand } from "../interfaces";
 import { getPlayer } from "../services/player";
-import { Context } from "../classes/context";
 
-class Command implements ICommand {
-  commandName = "volume";
-  commandDescription = "Adjust the player volume";
-  aliases = ["v", "vol"];
-  conditions = [CONDITIONS.SameVoice];
-  slashOptions = [
-    {
-      name: "volume",
-      description: "The volume value as %",
-      type: CommandTypes.NUMBER,
-      required: true,
-    },
-  ];
-  execute = async (
-    shoukaku: Shoukaku,
-    client: Client,
-    context: Context,
-    args: IArgument[]
-  ) => {
-    if (!shoukaku) return;
-    if (!context.guildId || !context.member?.voice.channelId) return;
-
-    const playerInstance = await getPlayer(shoukaku, {
-      context,
-      noCreate: true,
-    });
-    if (playerInstance) {
-      const volumeArg = args.find((arg) => arg.name === "volume");
-      if (!volumeArg) {
-        context.reply("How the fuck did you do that?");
-        return;
-      }
-      const actualVolume = volumeArg.value > 500 ? 500 : volumeArg.value;
-      const embed = new EmbedBuilder().setColor("DarkRed").setTitle("Volume").setDescription(actualVolume.toString() + '%');
-
-      context.reply({ embeds: [embed] });
-      await playerInstance.setVolume(actualVolume / 100);
-    } else {
-      context.reply("I am not connected to any voice channels!");
+const command: ICommand = {
+  data: new SlashCommandBuilder()
+    .setName("volume")
+    .setDescription("Adjust the player volume")
+    .addNumberOption((option) =>
+      option
+        .setName("volume")
+        .setDescription("The volume value as %")
+        .setMinValue(0)
+        .setMaxValue(500)
+        .setRequired(true),
+    ),
+  conditions: [CONDITIONS.SameVoice],
+  execute: async (context, interaction) => {
+    const player = await getPlayer(context.client, { context, noCreate: true });
+    if (!player) {
+      await context.reply("I am not connected to any voice channels!");
+      return;
     }
-  };
-  parseArgs = (args: string[]) => {
-    return [{ name: "volume", type: CommandTypes.NUMBER, value: args[0] }];
-  };
-}
 
-export default Command;
+    const volume = interaction.options.getNumber("volume", true);
+    const embed = new EmbedBuilder()
+      .setColor("DarkRed")
+      .setTitle("Volume")
+      .setDescription(`${volume}%`);
+
+    await context.reply({ embeds: [embed] });
+    await player.setFilters({ volume: volume / 100 });
+  },
+};
+
+export default command;

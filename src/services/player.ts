@@ -1,37 +1,46 @@
 import {
-  Client,
-  Collection,
-  Message,
-  ReactionUserManager,
-  TextChannel,
-} from "discord.js";
-import {
-  Band,
-  ChannelMixSettings,
-  DistortionSettings,
-  FreqSettings,
-  KaraokeSettings,
-  LowPassSettings,
-  Node,
-  Player,
-  RotationSettings,
-  Shoukaku,
-  TimescaleSettings,
-  Track,
-} from "shoukaku";
+  AudioPlayer,
+  AudioPlayerStatus,
+  NoSubscriberBehavior,
+  StreamType,
+  VoiceConnection,
+  VoiceConnectionStatus,
+  createAudioPlayer,
+  createAudioResource,
+  entersState,
+  joinVoiceChannel,
+} from "@discordjs/voice";
+import { Client, Collection, TextChannel } from "discord.js";
+import { FFmpeg } from "prism-media";
+import { createResumableAudioStream } from "../util/resumableFetch";
 import { Context } from "../classes/context";
-import { createNowPlayingEmbed, shuffleArray, truncateString } from "../util";
+import { createNowPlayingEmbed } from "../util";
+import { shuffleArray } from "../util";
+import {
+  FilterState,
+  FilterUpdate,
+  buildFilterChain,
+  defaultFilterState,
+} from "../util/ffmpegFilters";
+import { TrackInfo, getPlayableUrl } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 
+export class TrackExt {
+  track: TrackInfo;
+  queuedFromChannelId?: string;
+
+  constructor(track: TrackInfo, queuedFromChannelId?: string) {
+    this.track = track;
+    this.queuedFromChannelId = queuedFromChannelId;
+  }
+}
+
 /**
  * Returns a player that can be used to play tracks from the track queue.
- * @param shoukaku Shoukaku that handles the players
- * @param params different parameters to be used to retrieve necessary information
- * @returns Promise of an instance of player
  */
 export async function getPlayer(
-  shoukaku: Shoukaku,
+  client: Client,
   params: {
     voiceChannelId?: string;
     guildId?: string;
@@ -39,7 +48,7 @@ export async function getPlayer(
     noCreate?: boolean;
   },
 ) {
-  const guildId = params.context?.member?.guild.id ?? params.guildId;
+  const guildId = params.context?.guildId ?? params.guildId;
   if (!guildId) throw new Error("No guild id found");
 
   const player = players.get(guildId);
@@ -49,30 +58,18 @@ export async function getPlayer(
     params.context?.member?.voice.channelId ?? params.voiceChannelId;
   if (!channelId) throw new Error("No voice channel id found");
 
-  const newPlayer = params.context?.client
-    ? new PlayerManager(guildId, shoukaku, params.context?.client)
-    : undefined;
-  if (!newPlayer) throw new Error("Error at player instance creation!");
+  const newPlayer = new PlayerManager(guildId, client);
 
   try {
-    const channel =
-      params.context?.client.channels.cache.get(channelId) ??
-      (await params.context?.client.channels.fetch(channelId));
-    if (!channel || !channel.isVoiceBased())
-      throw new Error("The channel is not a valid voice channel");
-
-    const guild =
-      params.context?.client.guilds.cache.get(guildId) ??
-      (await params.context?.client.guilds.fetch(guildId));
-    if (!guild) throw new Error("No guild found for the given id");
-
-    await newPlayer.createPlayer(channel.id);
-    players.set(guild.id, newPlayer);
+    await newPlayer.createPlayer(channelId);
+    players.set(guildId, newPlayer);
     return newPlayer;
   } catch (error: any) {
     throw new Error(error.toString());
   }
 }
+
+export const hasPlayer = (guildId: string) => players.has(guildId);
 
 export const getPlayerInstance = (guildId: string) => {
   const player = players.get(guildId);
@@ -84,14 +81,14 @@ export async function removePlayer(params: {
   guildId?: string;
   context?: Context;
 }) {
-  const guildId = params.context?.member?.guild.id ?? params.guildId;
+  const guildId = params.context?.guildId ?? params.guildId;
   if (!guildId) throw new Error("No guild id found");
 
   const player = players.get(guildId);
   if (!player) throw new Error("No player found");
 
   try {
-    await player.removePlayer();
+    await player.destroy();
     return true;
   } catch (error) {
     console.error(error);
@@ -101,50 +98,72 @@ export async function removePlayer(params: {
 
 /**
  * Queues a new track to be played
- * @param track The metadata for the track to be queued
- * @param guildId The id of the guild the track is queued for
  */
 export async function queueTrack(
-  shoukaku: Shoukaku,
-  track: Track,
+  client: Client,
+  track: TrackInfo,
   context: Context,
 ) {
-  const channel = context.channelId;
-  if (!channel) throw new Error("No channel id found!");
-  const player = await getPlayer(shoukaku, { context });
-
-  player?.queueTrack(new TrackExt(track, channel));
+  const player = await getPlayer(client, { context });
+  await player?.queueTrack(new TrackExt(track, context.channelId));
 }
 
 class PlayerManager {
-  player?: Player;
-  private shoukaku: Shoukaku;
+  private connection?: VoiceConnection;
+  private audioPlayer: AudioPlayer;
   private client: Client;
   private guildId: string;
   private queue: TrackExt[] = [];
-  private loop: boolean = false;
+  private loop = false;
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
-  private timeoutDuration: number = 30000;
-  private skipping: boolean = false;
+  private timeoutDuration = Number.parseInt(
+    process.env.TIMEOUT_DURATION ?? "30000",
+    10,
+  );
+  private filters: FilterState = defaultFilterState();
+  private ffmpeg?: FFmpeg;
+  private fetchAbort?: AbortController;
+  private restarting = false;
+  private positionOffsetMs = 0;
+  private segmentStartedAt = 0;
+  private pausedAt?: number;
 
-  /**
-   * Creates a new player manager instance that manages the player that is tied to the node controlling this manager
-   * @param guildId The id of the guild the player is created for
-   * @param shoukaku The Node that manages this player instance
-   */
-  constructor(guildId: string, shoukaku: Shoukaku, client: Client) {
+  constructor(guildId: string, client: Client) {
     this.guildId = guildId;
-    this.shoukaku = shoukaku;
     this.client = client;
+    this.audioPlayer = createAudioPlayer({
+      behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
+    });
+
+    // A stream error also triggers the Idle transition below, so this only logs.
+    this.audioPlayer.on(AudioPlayerStatus.Idle, () => this.handleIdle());
+    this.audioPlayer.on("error", (error) => {
+      console.error("Audio player error:", error);
+    });
+    this.audioPlayer.on("stateChange", (oldState, newState) => {
+      console.log(
+        `[guild ${this.guildId}] audio player ${oldState.status} -> ${newState.status}` +
+          (oldState.status !== AudioPlayerStatus.Idle
+            ? ` (playbackDuration: ${(oldState as any).playbackDuration ?? "n/a"}ms)`
+            : ""),
+      );
+    });
+  }
+
+  private handleIdle() {
+    if (this.restarting) {
+      this.restarting = false;
+      return;
+    }
+    this.nextTrack({ sendEmbed: true });
   }
 
   startMonitoring() {
     console.log(`Bot idling on server ${this.guildId}`);
     this.timeoutId = setTimeout(() => {
       console.log("Idle finished.. Where we at??");
-
-      this.removePlayer();
+      this.destroy();
       console.log(`Bot disconnected due to idle on server ${this.guildId}`);
     }, this.timeoutDuration);
   }
@@ -158,68 +177,80 @@ class PlayerManager {
   }
 
   /**
-   * Creates a new player for the given guild and joins the defined voice channel
-   * @param channelId The voice channel the player is going to join
+   * Creates a new voice connection for the given guild and joins the defined voice channel
    */
   async createPlayer(channelId: string) {
-    if (this.player) return;
+    if (this.connection) return;
     console.log(
       `Creating player for guild ${this.guildId} in channel ${channelId}`,
     );
-    this.player = await this.shoukaku.joinVoiceChannel({
+
+    const guild = await this.client.guilds.fetch(this.guildId);
+    this.connection = joinVoiceChannel({
       guildId: this.guildId,
       channelId,
-      shardId: 0, // if unsharded it will always be zero (depending on your library implementation)
-      deaf: true,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true,
     });
 
-    this.player.on("end", (reason) => {
-      console.log("Song ended", reason);
-      if (this.skipping) return;
-      if (this.player) {
-        this.player.track = null;
+    this.connection.subscribe(this.audioPlayer);
+
+    try {
+      await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
+    } catch (error) {
+      this.connection.destroy();
+      this.connection = undefined;
+      throw new Error("Failed to join the voice channel in time");
+    }
+
+    this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
+      try {
+        await Promise.race([
+          entersState(this.connection!, VoiceConnectionStatus.Signalling, 5000),
+          entersState(this.connection!, VoiceConnectionStatus.Connecting, 5000),
+        ]);
+      } catch {
+        this.destroy();
       }
-      if (this.queue.length > 0)
-        this.nextTrack({ noReplace: true, sendEmbed: true });
-      else {
-        const guild = this.client.guilds.cache.get(this.guildId);
-        if (guild) {
-          guild.members.me?.setNickname(null);
-          this.startMonitoring();
-        }
-      }
     });
 
-    this.player.on("start", (data) => {
-      console.log(data.track.info);
-    });
-
-    this.player.on("closed", async () => {
-      await this.removePlayer();
+    this.connection.on(VoiceConnectionStatus.Destroyed, () => {
+      players.delete(this.guildId);
     });
   }
 
-  async removePlayer() {
-    // this.player?.removeAllListeners();
-    this.shoukaku.leaveVoiceChannel(this.guildId);
-    await this.player?.destroy();
-    this.player = undefined;
+  async destroy() {
+    this.stopMonitoring();
+    this.restarting = true;
+    this.fetchAbort?.abort();
+    this.ffmpeg?.destroy();
+    this.audioPlayer.stop(true);
+    this.connection?.destroy();
     players.delete(this.guildId);
   }
 
-  async togglePausePlayer() {
-    if (!this.player) throw new Error("The player doesn't exist");
-    await this.player.setPaused(!this.player.paused);
-    return this.player.paused;
+  togglePausePlayer() {
+    const paused = this.audioPlayer.state.status === AudioPlayerStatus.Paused;
+    if (paused) {
+      this.audioPlayer.unpause();
+      if (this.pausedAt) {
+        // Shift the segment start forward so getPositionMs() ignores time spent paused
+        this.segmentStartedAt += Date.now() - this.pausedAt;
+        this.pausedAt = undefined;
+      }
+    } else {
+      this.audioPlayer.pause();
+      this.pausedAt = Date.now();
+    }
+    return !paused;
   }
 
   /**
-   * Adds a new track into queue and starts playback if queue is empty
-   * @param track The metadata for the track to be queued
+   * Adds a new track into the queue and starts playback if the queue was empty
    */
   async queueTrack(track: TrackExt) {
     this.queue.push(track);
-    if (!this.player?.track) await this.nextTrack({ sendEmbed: true });
+    if (!this.currentTrack) await this.nextTrack({ sendEmbed: true });
   }
 
   toggleLoop() {
@@ -232,40 +263,31 @@ class PlayerManager {
     return true;
   }
 
-  async seekSong(target: number) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.seekTo(target);
+  async seekSong(targetMs: number) {
+    if (!this.currentTrack) throw new Error("Nothing is playing");
+    await this.playCurrentTrack(targetMs);
     return true;
   }
 
   async skipSong() {
-    this.skipping = true;
-    await this.nextTrack({
-      noReplace: false,
-      forceSkip: true,
-      sendEmbed: true,
-    });
-    this.skipping = false;
+    await this.nextTrack({ forceSkip: true, sendEmbed: true });
   }
 
-  async nextTrack(options: {
-    noReplace?: boolean;
+  private async nextTrack(options: {
     forceSkip?: boolean;
     sendEmbed?: boolean;
   }) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    if ((!this.currentTrack && this.loop) || !this.loop || options.forceSkip)
+    if ((!this.currentTrack && this.loop) || !this.loop || options.forceSkip) {
       this.currentTrack = this.queue.shift();
+    }
     if (!this.currentTrack) {
-      await this.player.stopTrack();
+      this.restarting = true;
+      this.audioPlayer.stop(true);
       this.startMonitoring();
       return;
     }
     this.stopMonitoring();
+
     if (this.currentTrack.queuedFromChannelId && options.sendEmbed) {
       const channel = this.client.channels.cache.get(
         this.currentTrack.queuedFromChannelId,
@@ -274,158 +296,175 @@ class PlayerManager {
         const embed = createNowPlayingEmbed(this.currentTrack.track);
         await channel.send({ embeds: [embed] });
       }
-      // if (channel?.guild?.members.me && this.currentTrack.track.info?.title) {
-      //   await channel.guild.members.me.setNickname(
-      //     truncateString(this.currentTrack.track.info.title)
-      //   );
-      // }
     }
 
-    await this.player.playTrack(
-      {
-        track: { encoded: this.currentTrack.track.encoded },
-      },
-      options.noReplace ?? false,
+    try {
+      await this.playCurrentTrack(0);
+    } catch (error) {
+      await this.reportPlaybackFailure(this.currentTrack, error);
+      this.currentTrack = undefined;
+      await this.nextTrack({ sendEmbed: true });
+    }
+  }
+
+  /**
+   * Notifies the channel a track was queued from that it couldn't be played.
+   * Used both for failures caught synchronously (e.g. resolving the stream
+   * url) and ones surfacing later from the ffmpeg/fetch pipeline once
+   * playback had already started.
+   */
+  private async reportPlaybackFailure(track: TrackExt, error: unknown) {
+    console.error(`Failed to play "${track.track.title}":`, error);
+    if (!track.queuedFromChannelId) return;
+    const channel = this.client.channels.cache.get(track.queuedFromChannelId) as TextChannel;
+    if (!channel?.isTextBased()) return;
+    await channel
+      .send(`⚠️ Couldn't play **${track.track.title}** - YouTube blocked the request. Skipping.`)
+      .catch((sendError) => console.error("Failed to report playback failure:", sendError));
+  }
+
+  /**
+   * (Re)starts ffmpeg for the current track at the given position, applying
+   * the current filter state. Used for the initial play, skip, seek and
+   * whenever a filter/volume change requires restarting the audio pipeline.
+   *
+   * The audio bytes are fetched here in Node (not by ffmpeg itself) and piped
+   * into ffmpeg's stdin. YouTube's signed stream urls are bound to the IP
+   * that requested them; ffmpeg is a separate process with its own network
+   * stack, and in a container that can resolve/egress differently than Node
+   * does, causing YouTube to 403 a request from a "different" IP for the same
+   * url. Fetching in the same process that obtained the url guarantees they
+   * match. The tradeoff is that seeking becomes a decode-and-discard (-ss
+   * after -i) instead of an efficient input-side seek, since a piped stream
+   * isn't seekable - acceptable for a music bot's typical seek distances.
+   */
+  private async playCurrentTrack(startMs: number) {
+    if (!this.currentTrack) return;
+    const trackAtStart = this.currentTrack;
+
+    const url = await getPlayableUrl(this.currentTrack.track);
+    const filterArgs = buildFilterChain(this.filters);
+
+    this.fetchAbort?.abort();
+    this.fetchAbort = new AbortController();
+    const inputStream = createResumableAudioStream(url, this.fetchAbort.signal);
+
+    // Fires if the fetch permanently fails (e.g. exhausts its retries) after
+    // playback had already started, i.e. too late for the caller's own
+    // try/catch. Only act on it if this is still the track actually playing -
+    // an older, already-superseded pipeline (skip/seek/filter change) can
+    // still emit a late error after being destroyed.
+    const onPlaybackFailure = (error: unknown) => {
+      if (this.currentTrack !== trackAtStart) return;
+      this.reportPlaybackFailure(trackAtStart, error).catch(() => {});
+      this.currentTrack = undefined;
+    };
+
+    const args = [
+      "-loglevel",
+      "warning",
+      "-analyzeduration",
+      "0",
+      "-i",
+      "pipe:0",
+      ...(startMs > 0 ? ["-ss", (startMs / 1000).toString()] : []),
+      ...(filterArgs.length ? ["-af", filterArgs.join(",")] : []),
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-f",
+      "opus",
+    ];
+
+    this.ffmpeg?.destroy();
+    this.ffmpeg = new FFmpeg({ args });
+    this.ffmpeg.on("error", (error) => {
+      console.error("ffmpeg error:", error);
+      onPlaybackFailure(error);
+    });
+    this.ffmpeg.process.stderr?.on("data", (chunk) =>
+      console.log(`[guild ${this.guildId}] ffmpeg: ${chunk.toString().trim()}`),
     );
-    return this.currentTrack;
+    inputStream.on("error", (error: Error) => {
+      console.error("audio fetch stream error:", error);
+      onPlaybackFailure(error);
+    });
+    inputStream.pipe(this.ffmpeg);
+
+    const resource = createAudioResource(this.ffmpeg, {
+      inputType: StreamType.OggOpus,
+    });
+    console.log(
+      `[guild ${this.guildId}] starting playback of "${this.currentTrack.track.title}" at ${startMs}ms`,
+    );
+
+    this.positionOffsetMs = startMs;
+    this.segmentStartedAt = Date.now();
+    // Keep the pause clock in sync with the new segment so a later resume
+    // (or another restart while still paused) computes the position correctly
+    if (this.pausedAt) this.pausedAt = this.segmentStartedAt;
+
+    this.audioPlayer.play(resource);
+    // Restarting the pipeline (e.g. for a filter change) must not un-pause playback
+    if (this.pausedAt) this.audioPlayer.pause();
+  }
+
+  private getPositionMs() {
+    if (!this.segmentStartedAt) return 0;
+    const now = this.pausedAt ?? Date.now();
+    return this.positionOffsetMs + (now - this.segmentStartedAt);
+  }
+
+  private async applyFiltersLive() {
+    if (!this.currentTrack) return;
+    await this.playCurrentTrack(this.getPositionMs());
   }
 
   getQueue() {
     return this.queue;
   }
 
-  async setTimescale(value: TimescaleSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setTimescale(value);
-  }
-
-  async setVolume(value: number) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setFilterVolume(value);
-  }
-
-  async setEqualizer(value: Band[]) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setEqualizer(value);
-  }
-
-  async setKaraoke(value: KaraokeSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setKaraoke(value);
-  }
-
-  async setTremolo(value: FreqSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setTremolo(value);
-  }
-
-  async setVibrato(value: FreqSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setVibrato(value);
-  }
-
-  async setDistortion(value: DistortionSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setDistortion(value);
-  }
-
-  async setRotation(value: RotationSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setRotation(value);
-  }
-
-  async setChannelMix(value: ChannelMixSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setChannelMix(value);
-  }
-
-  async setLowPass(value: LowPassSettings) {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.setLowPass(value);
-  }
-
-  async clearFilters() {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.clearFilters();
-  }
-
-  async destroy() {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    await this.player.destroy();
-    players.delete(this.guildId);
-  }
-
   getCurrentTrack() {
     return this.currentTrack;
   }
 
-  getPlayerInstance() {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
+  /**
+   * Applies one or more filter changes in a single ffmpeg pipeline restart.
+   * Fields are merged onto the existing filter state; only what's passed changes.
+   */
+  async setFilters(update: FilterUpdate) {
+    if (update.volume !== undefined) this.filters.volume = update.volume;
+
+    if (update.timescale) {
+      const defined = Object.fromEntries(
+        Object.entries(update.timescale).filter(([, v]) => v !== undefined),
+      );
+      this.filters.timescale = { ...this.filters.timescale, ...defined };
     }
-    return this.player;
+
+    if (update.equalizerBands) {
+      const equalizer = new Array(15).fill(0);
+      update.equalizerBands.forEach(({ band, gain }) => {
+        if (band >= 0 && band < equalizer.length) equalizer[band] = gain;
+      });
+      this.filters.equalizer = equalizer;
+    }
+
+    if (update.tremolo) this.filters.tremolo = update.tremolo;
+    if (update.vibrato) this.filters.vibrato = update.vibrato;
+    if (update.lowPass) this.filters.lowPass = update.lowPass;
+    if (update.distortion !== undefined) this.filters.distortion = update.distortion;
+
+    await this.applyFiltersLive();
   }
 
-  getPlayerState() {
-    if (!this.player) {
-      throw new Error("The player doesn't exist");
-    }
-    return {
-      paused: this.player.paused,
-      position: this.player.position,
-      volume: this.player.filters?.volume ?? 100,
-      timescale: this.player.filters?.timescale,
-      equalizer: this.player.filters?.equalizer,
-      karaoke: this.player.filters?.karaoke,
-      tremolo: this.player.filters?.tremolo,
-      vibrato: this.player.filters?.vibrato,
-      distortion: this.player.filters?.distortion,
-      rotation: this.player.filters?.rotation,
-      channelMix: this.player.filters?.channelMix,
-      lowPass: this.player.filters?.lowPass,
-    };
+  async clearFilters() {
+    this.filters = defaultFilterState();
+    await this.applyFiltersLive();
   }
 
   getGuildId() {
     return this.guildId;
-  }
-}
-
-export class TrackExt {
-  track: Track;
-  queuedFromChannelId?: string;
-
-  /**
-   * Creates a new extended Track instance that adds additional information alongside the track
-   * @param track The track itself
-   * @param queuedFromChannelId Optional field that contains a channel id where the track was queued from
-   */
-  constructor(track: Track, queuedFromChannelId?: string) {
-    this.track = track;
-    this.queuedFromChannelId = queuedFromChannelId;
   }
 }

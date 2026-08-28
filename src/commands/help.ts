@@ -1,31 +1,22 @@
-import { Client, EmbedBuilder } from "discord.js";
-import { Shoukaku } from "shoukaku";
-import { CONDITIONS, IArgument, ICommand } from "../interfaces";
-import { Context } from "../classes/context";
+import { EmbedBuilder, SlashCommandBuilder } from "discord.js";
+import { ICommand } from "../interfaces";
 import { getCommandNamesAndDescriptions } from ".";
 
-class Command implements ICommand {
-  commandName = "help";
-  commandDescription = "Sends an embed that displays the available commands";
-  aliases = ["h", "?"];
-  conditions = [];
-  slashOptions = [];
-  execute = (
-    shoukaku: Shoukaku,
-    client: Client<boolean>,
-    context: Context,
-    args: IArgument[]
-  ) => {
+const command: ICommand = {
+  data: new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Sends an embed that displays the available commands"),
+  conditions: [],
+  execute: async (context) => {
     const commands = getCommandNamesAndDescriptions();
     const embed = new EmbedBuilder().setColor("DarkOrange").setTitle("Help");
 
     commands.forEach((command) => {
-      embed.addFields({ name: command.name, value: command.desc });
+      embed.addFields({ name: `/${command.name}`, value: command.description });
     });
 
-    context.reply({ embeds: [embed] });
-  };
-  parseArgs = (args: string[]) => [];
-}
+    await context.reply({ embeds: [embed] });
+  },
+};
 
-export default Command;
+export default command;

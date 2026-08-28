@@ -1,76 +1,62 @@
 import { EmbedBuilder } from "discord.js";
-import { Track } from "shoukaku";
+import { TrackInfo } from "../services/trackSource";
 import { timeConvert } from "./timeConvert";
 
-export const createEmbed = (metadata: Track) => {
+const formatLength = (track: TrackInfo) => {
+  if (track.isLive) return "🔴 Live";
+  if (!track.durationMs) return "Unknown";
+  return timeConvert(track.durationMs);
+};
+
+export const createEmbed = (track: TrackInfo) => {
   const coverColor = "#ff0000";
   const embed = new EmbedBuilder()
     .setColor(coverColor)
     .setTitle("Song queued")
     .addFields(
-      { inline: true, name: "Title", value: metadata.info?.title || "Unknown" },
-      {
-        inline: true,
-        name: "Artist",
-        value: metadata.info?.author || "Unknown",
-      },
+      { inline: true, name: "Title", value: track.title || "Unknown" },
+      { inline: true, name: "Artist", value: track.author || "Unknown" },
       {
         inline: true,
         name: "Length",
-        value:
-          (metadata.info?.length < 9223372036854776
-            ? timeConvert(metadata.info?.length)
-            : "🔴 Live") || "Unknown",
-      }
+        value: formatLength(track),
+      },
     );
+  if (track.thumbnail) embed.setThumbnail(track.thumbnail);
   return embed;
 };
 
-export const createPlaylistEmbed = (metadata: Track[]) => {
+export const createPlaylistEmbed = (tracks: TrackInfo[]) => {
   const coverColor = "#ff0000";
-  let totalLength = 0;
-  for (let i = 0; i < metadata.length; i++) {
-    totalLength += metadata[i].info?.length ?? 0;
-  }
+  const totalLength = tracks.reduce((sum, track) => sum + track.durationMs, 0);
   const embed = new EmbedBuilder()
     .setColor(coverColor)
     .setTitle("Playlist queued")
     .addFields(
-      { inline: true, name: "Count", value: metadata.length.toString() || "Unknown" },
+      { inline: true, name: "Count", value: tracks.length.toString() },
       {
         inline: true,
         name: "Length",
-        value:
-          (totalLength < 9223372036854776
-            ? timeConvert(totalLength)
-            : "🔴 Live") || "Unknown",
-      }
+        value: tracks.some((t) => t.isLive) ? "🔴 Live" : timeConvert(totalLength),
+      },
     );
   return embed;
 };
 
-export const createNowPlayingEmbed = (metadata: Track) => {
+export const createNowPlayingEmbed = (track: TrackInfo) => {
   const coverColor = "#ff0000";
   const embed = new EmbedBuilder()
     .setColor(coverColor)
     .setTitle("Now playing")
-    .setDescription(metadata.info?.title || "Unknown")
+    .setDescription(track.title || "Unknown")
     .addFields(
-      {
-        inline: true,
-        name: "Artist",
-        value: metadata.info?.author || "Unknown",
-      },
+      { inline: true, name: "Artist", value: track.author || "Unknown" },
       {
         inline: true,
         name: "Length",
-        value:
-          (metadata.info?.length < 9223372036854776
-            ? timeConvert(metadata.info?.length)
-            : "🔴 Live") || "Unknown",
-      }
+        value: formatLength(track),
+      },
     );
-  if (metadata.info?.artworkUrl)
-    embed.setImage(metadata.info.artworkUrl);
+  if (track.thumbnail) embed.setImage(track.thumbnail);
   return embed;
 };

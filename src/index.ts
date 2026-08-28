@@ -1,3 +1,10 @@
+import { setDefaultResultOrder } from "node:dns";
+// Since Node 17, dns.lookup() no longer prefers IPv4 by default. Discord's voice
+// UDP IP-discovery step hangs (instead of erroring) when it draws an unroutable
+// IPv6 address first, which is why a voice connection can join but never
+// reach Ready inside Docker. This must run before anything else connects.
+setDefaultResultOrder("ipv4first");
+
 import {
   ActivityType,
   Client,
@@ -5,89 +12,40 @@ import {
   Events,
   GatewayIntentBits,
   Guild,
-  Partials,
   REST,
   Routes,
 } from "discord.js";
-import { Shoukaku, Connectors } from "shoukaku";
 import { getCommands } from "./commands";
-import { IArgument, ICommand } from "./interfaces";
+import { ICommand } from "./interfaces";
 import { verifyConditions } from "./util";
 import { Context } from "./classes/context";
-import { migrate, openDb } from "./database/controller";
 
 import * as dotenv from "dotenv";
 dotenv.config();
 
-const prefix = process.env.PREFIX ?? "!";
-
-const db = openDb().then((ready) => {
-  console.log("Database ready!");
-  migrate(ready, "./migrations/init_db.sql");
-  return ready;
-});
-
-const Nodes = [
-  {
-    name: process.env.LAVALINK_NAME ?? "Localhost",
-    url: process.env.LAVALINK_URL ?? "localhost:6969",
-    auth: process.env.LAVALINK_AUTH ?? "shirakami_fubuki",
-  },
-];
-
 const commands = new Collection<string, ICommand>();
 
-getCommands().map((command) => {
-  const names = command.aliases.concat(command.commandName);
-  names.forEach((name) => {
-    commands.set(name, command);
-  });
-  console.log(`[COMMANDS]: ${command.commandName}`);
+getCommands().forEach((command) => {
+  commands.set(command.data.name, command);
+  console.log(`[COMMANDS]: ${command.data.name}`);
 });
 
-const mappedCommands = commands.map((command) => ({
-  name: command.commandName,
-  description: command.commandDescription,
-  options: command.slashOptions,
-  type: command.slashOptions.length > 0 ? 1 : undefined,
-}));
-
-const uniqueCommands = Array.from(
-  new Set(mappedCommands.map((obj) => obj.name)),
-).map((name) => {
-  return mappedCommands.find((obj) => obj.name === name);
-});
+const commandPayload = commands.map((command) => command.data.toJSON());
 
 const rest = new REST().setToken(process.env.DISCORD_TOKEN ?? "");
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates,
-  ],
-  partials: [Partials.Channel],
-});
-const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), Nodes);
-// ALWAYS handle error, logging it will do
-shoukaku.on(Events.Error, (_, error) => console.error(error));
-
-// Logged on successfully
-shoukaku.on("ready", async () => {
-  console.log("ready!");
-  client.user?.setActivity(`${prefix}help`, {
-    type: ActivityType.Listening,
-  });
-
-  client.guilds.cache.map(async (guild) => {
-    await registerSlashCommands(guild);
-    // await guild.members.me?.setNickname(null);
-  });
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-shoukaku.on("disconnect", () => console.log("FUCK! disconnected..."));
+client.once(Events.ClientReady, async (readyClient) => {
+  console.log(`Logged in as ${readyClient.user.tag}`);
+  readyClient.user.setActivity("/help", { type: ActivityType.Listening });
+
+  await Promise.all(
+    readyClient.guilds.cache.map((guild) => registerSlashCommands(guild)),
+  );
+});
 
 client.on(Events.GuildCreate, async (guild) => {
   console.log(`Joined guild '${guild.name}'`);
@@ -98,12 +56,8 @@ client.on(Events.GuildDelete, async (guild) => {
   console.log(`Left guild '${guild.name}'`);
 
   try {
-    // The delete method is used to fully remove all commands in the guild with the current set
     await rest.delete(
-      Routes.applicationGuildCommands(
-        process.env.DISCORD_APP_ID ?? "",
-        guild.id,
-      ),
+      Routes.applicationGuildCommands(process.env.DISCORD_APP_ID ?? "", guild.id),
     );
     console.log(`Slash commands deleted successfully for guild ${guild.name}!`);
   } catch (error) {
@@ -111,110 +65,38 @@ client.on(Events.GuildDelete, async (guild) => {
   }
 });
 
-client.on(Events.MessageCreate, async (message) => {
-  const content = message.content;
-  if (!content.startsWith(prefix) || message.author.bot) return;
-
-  const args = content.slice(prefix.length, content.length).split(/ +/); // Get all the arguments of the message
-
-  const command = args.shift(); // Initialize the command variable
-  if (!command) return;
-
-  if (commands.has(command)) {
-    const commandInstance = commands.get(command);
-    if (!commandInstance) return;
-    try {
-      const context = new Context({
-        guildId: message.guildId,
-        client,
-        channelId: message.channelId,
-        message,
-        member: message.member,
-      });
-      verifyConditions({
-        client,
-        guild: message.guild,
-        conditions: commandInstance.conditions,
-        context,
-      });
-      try {
-        const parsedArgs = commandInstance.parseArgs(args);
-        try {
-          commandInstance.execute(shoukaku, client, context, parsedArgs);
-        } catch (error) {
-          message.reply(error?.toString() ?? "Error executing command");
-          console.error(error);
-        }
-      } catch (error) {
-        message.reply(error?.toString() ?? "Error parsing arguments");
-        console.error(error);
-      }
-    } catch (error) {
-      message.reply(error?.toString() ?? "Unknown error happened");
-      console.error(error);
-    }
-  } else {
-    console.log("Unknown command executed: ", command);
-  }
-});
-
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
   if (!interaction.guildId) {
-    interaction.reply("Commands can only be used in a server!");
+    await interaction.reply("Commands can only be used in a server!");
     return;
   }
 
-  if (!interaction.isChatInputCommand()) {
-    interaction.reply("Only chat input commands are supported!");
+  const commandInstance = commands.get(interaction.commandName);
+  if (!commandInstance) {
+    await interaction.reply("Whaa...? I don't understand that command");
     return;
   }
 
-  const command = interaction.commandName;
-  const args = interaction.options.data;
+  const context = new Context(interaction);
 
-  const context = new Context({
-    guildId: interaction.guildId,
-    client,
-    channelId: interaction.channelId,
-    interaction,
-    member: interaction.member,
-  });
-
-  if (commands.has(command)) {
-    const commandInstance = commands.get(command);
-    if (!commandInstance) return;
-    try {
-      verifyConditions({
-        client,
-        guild: interaction.guild,
-        conditions: commandInstance.conditions,
-        context,
-      });
-      try {
-        commandInstance.execute(shoukaku, client, context, args as IArgument[]);
-      } catch (error) {
-        context.reply(error?.toString() ?? "Error executing command");
-        console.error(error);
-      }
-    } catch (error) {
-      context.reply(error?.toString() ?? "Unknown error happened");
-      console.error(error);
-    }
-  } else {
-    context.reply("Whaa...? I don't understand that command");
+  try {
+    verifyConditions(commandInstance.conditions, context);
+    await commandInstance.execute(context, interaction);
+  } catch (error: any) {
+    console.error(error);
+    await context
+      .reply(error?.message ?? "Something went wrong")
+      .catch((replyError) => console.error("Failed to report error:", replyError));
   }
 });
 
 const registerSlashCommands = async (guild: Guild) => {
   try {
-    // The put method is used to fully refresh all commands in the guild with the current set
+    // The put method fully refreshes all commands in the guild with the current set
     await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.DISCORD_APP_ID ?? "",
-        guild.id,
-      ),
-      { body: uniqueCommands },
+      Routes.applicationGuildCommands(process.env.DISCORD_APP_ID ?? "", guild.id),
+      { body: commandPayload },
     );
     console.log(
       `Slash commands registered successfully for guild ${guild.name}!`,
@@ -223,7 +105,5 @@ const registerSlashCommands = async (guild: Guild) => {
     console.error("Failed to register slash commands:", error);
   }
 };
-
-export const getShoukakuInstance = () => shoukaku;
 
 client.login(process.env.DISCORD_TOKEN);

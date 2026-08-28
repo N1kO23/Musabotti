@@ -1,56 +1,43 @@
 import {
-  APIInteractionGuildMember,
-  CacheType,
-  ChannelType,
+  ChatInputCommandInteraction,
   Client,
-  Guild,
   GuildMember,
-  Interaction,
-  Message,
-  MessagePayload,
-  MessageReplyOptions,
-  InteractionCallbackResponse,
+  InteractionEditReplyOptions,
+  InteractionReplyOptions,
 } from "discord.js";
-import { IContext } from "../interfaces";
 
-export class Context implements IContext {
+type ReplyOptions = string | (InteractionReplyOptions & InteractionEditReplyOptions);
+
+export class Context {
   client: Client;
-  guildId: string | null;
-  channelId: string | null;
+  interaction: ChatInputCommandInteraction;
+  guildId: string;
+  channelId: string;
   member: GuildMember | null;
-  message?: Message;
-  interaction?: Interaction<CacheType>;
 
-  constructor(params: {
-    client: Client;
-    guildId: string | null;
-    channelId: string | null;
-    member: GuildMember | APIInteractionGuildMember | null;
-    message?: Message;
-    interaction?: Interaction;
-  }) {
-    const { client, guildId, channelId, member, message, interaction } = params;
-    this.client = client;
-    this.guildId = guildId;
-    this.channelId = channelId;
-    this.message = message;
+  constructor(interaction: ChatInputCommandInteraction) {
+    this.client = interaction.client;
     this.interaction = interaction;
-
-    const guild = this.client.guilds.cache.get(guildId ?? "");
+    this.guildId = interaction.guildId ?? "";
+    this.channelId = interaction.channelId;
     this.member =
-      guild?.members.cache.get(member?.user.id ?? "") ??
-      (member as GuildMember);
+      interaction.member instanceof GuildMember
+        ? interaction.member
+        : (interaction.guild?.members.cache.get(interaction.user.id) ?? null);
   }
 
-  async reply(
-    options: any,
-  ): Promise<Message<boolean> | InteractionCallbackResponse<boolean>> {
-    if (this.message) {
-      return this.message.reply(options);
-    } else if (this.interaction && this.interaction.isChatInputCommand()) {
-      return this.interaction.reply(options);
-    } else {
-      throw new Error(`Invalid reply command`);
+  /**
+   * Replies to the interaction, filling in the "thinking..." placeholder left
+   * by deferReply() if one is pending, or sending a follow-up if it already
+   * has a reply.
+   */
+  async reply(options: ReplyOptions) {
+    if (this.interaction.deferred) {
+      return this.interaction.editReply(options);
     }
+    if (this.interaction.replied) {
+      return this.interaction.followUp(options);
+    }
+    return this.interaction.reply(options);
   }
 }

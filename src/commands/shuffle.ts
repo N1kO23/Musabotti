@@ -1,39 +1,21 @@
-import { Client, Message } from "discord.js";
-import { Shoukaku } from "shoukaku";
-import { CONDITIONS, IArgument, ICommand } from "../interfaces";
+import { SlashCommandBuilder } from "discord.js";
+import { CONDITIONS, ICommand } from "../interfaces";
 import { getPlayer } from "../services/player";
-import { Context } from "../classes/context";
 
-class Command implements ICommand {
-  commandName = "shuffle";
-  commandDescription = "Shuffles the current queue";
-  aliases = ["sh", "reshuffle", "mix"];
-  conditions = [CONDITIONS.SameVoice];
-  slashOptions = [];
-  execute = async (
-    shoukaku: Shoukaku,
-    client: Client,
-    context: Context,
-    args: IArgument[]
-  ) => {
-    if (!shoukaku) return;
-    if (!context.guildId || !context.member?.voice.channelId) return;
-
-    const playerInstance = await getPlayer(shoukaku, {
-      context,
-      noCreate: true,
-    });
-    if (playerInstance) {
-      const allGood = playerInstance.shuffleQueue();
-      if (allGood)
-        context.reply("Queue shuffled!");
-      else
-        context.reply("Something went wrong!");
-    } else {
-      context.reply("I am not connected to any voice channels!");
+const command: ICommand = {
+  data: new SlashCommandBuilder()
+    .setName("shuffle")
+    .setDescription("Shuffles the current queue"),
+  conditions: [CONDITIONS.SameVoice],
+  execute: async (context) => {
+    const player = await getPlayer(context.client, { context, noCreate: true });
+    if (!player) {
+      await context.reply("I am not connected to any voice channels!");
+      return;
     }
-  };
-  parseArgs = (args: string[]) => [];
-}
+    player.shuffleQueue();
+    await context.reply("Queue shuffled!");
+  },
+};
 
-export default Command;
+export default command;

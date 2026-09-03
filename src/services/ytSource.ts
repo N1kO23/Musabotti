@@ -1,214 +1,280 @@
-import type { Innertube as InnertubeType } from "youtubei.js";
+import { spawn } from "child_process";
 import * as fs from "fs";
-import ytpl from "ytpl";
-import ytsearch from "yt-search";
-import { mintPoToken } from "./potoken";
+import * as os from "os";
+import * as path from "path";
+import { PassThrough, Readable } from "stream";
 import { ResolveResult, TrackInfo } from "./trackTypes";
+
+/**
+ * YouTube extraction goes through yt-dlp (a spawned binary, see Dockerfile)
+ * rather than a JS library. youtubei.js (which this used to be built on) kept
+ * failing to actually stream a real, non-restricted-looking video even with a
+ * signed-in account and a valid PoToken - yt-dlp's extraction is far more
+ * mature and battle-tested against YouTube's anti-bot measures, and succeeds
+ * on the exact videos that approach couldn't.
+ */
+const YTDLP_BIN = process.env.YTDLP_PATH ?? "yt-dlp";
 
 const URL_RE = /^https?:\/\//i;
 const PLAYLIST_ONLY_RE = /[?&]list=([^&]+)/;
-const VIDEO_ID_RE = /(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:watch\?v=|shorts\/|embed\/|live\/))([\w-]{11})/;
 
-/**
- * youtubei.js is ESM-only; the project compiles to CommonJS, so it has to be
- * loaded with a dynamic import() rather than a static import.
- */
-async function loadInnertube() {
-  const { Innertube, ClientType } = await import("youtubei.js");
-  return { Innertube, ClientType };
+interface YtDlpEntry {
+  id: string;
+  title: string;
+  channel?: string;
+  uploader?: string;
+  duration?: number;
+  is_live?: boolean;
+  webpage_url?: string;
+  url?: string;
+  thumbnail?: string;
+  thumbnails?: { url: string }[];
 }
 
-let innertube: Promise<InnertubeType> | undefined;
-
-// This session is deliberately anonymous and pinned to the IOS client, which
-// deciphers formats without needing YouTube's web player JS at all. A real
-// PoToken (see potoken.ts) is attached per-request instead of relying on
-// account cookies: merely having a cookie makes youtubei.js sign every
-// request with that account's SAPISID hash, and a real, previously
-// web-only Google account suddenly presenting as "the iOS app" is exactly
-// the kind of client/account mismatch YouTube's anti-abuse system rejects
-// with a 400 - a fake/garbage cookie doesn't trigger this since there's no
-// real account history to contradict. This is expected to keep shifting as
-// YouTube's anti-bot measures evolve.
-function getInnertube() {
-  if (!innertube) {
-    innertube = loadInnertube().then(({ Innertube, ClientType }) =>
-      Innertube.create({
-        generate_session_locally: true,
-        client_type: ClientType.IOS,
-      }),
-    );
-  }
-  return innertube;
-}
-
-function extractVideoId(url: string): string | undefined {
-  return url.match(VIDEO_ID_RE)?.[1];
+function runYtDlp(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(YTDLP_BIN, args);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        const lastLines = stderr.trim().split("\n").slice(-3).join(" | ");
+        reject(new Error(`yt-dlp exited with code ${code}${lastLines ? `: ${lastLines}` : ""}`));
+      }
+    });
+  });
 }
 
 /**
- * Some videos (age-restricted, or otherwise flagged as needing a real signed-
- * in account rather than just proof of a non-bot client) reject the anonymous
- * IOS session outright, PoToken or not. YOUTUBE_COOKIES_FILE/YOUTUBE_COOKIES
- * enables a fallback authenticated session for those - see getFallbackInnertube.
- * The cookie array is usually too large for a plain env var (see
- * docker-compose.yml for the file-based option); either the EditThisCookie-
- * style JSON array or a raw "name=value; name2=value2" Cookie header string
- * is accepted.
+ * Runs yt-dlp with cookies attached (if configured), retrying once without
+ * them if that fails. Stale/expired/invalid cookies (yt-dlp's "The page needs
+ * to be reloaded" is the classic symptom) would otherwise take down every
+ * video, including the many that don't need an authenticated session at all.
  */
-function loadCookieHeader(): string | undefined {
-  const cookiesPath = process.env.YOUTUBE_COOKIES_FILE;
-  const inlineCookies = process.env.YOUTUBE_COOKIES;
-  if (!cookiesPath && !inlineCookies) return undefined;
+async function runYtDlpResilient(baseArgs: string[]): Promise<string> {
+  const cookies = cookieArgs();
+  if (cookies.length === 0) return runYtDlp(baseArgs);
 
   try {
-    const raw = (cookiesPath ? fs.readFileSync(cookiesPath, "utf8") : inlineCookies)!.trim();
-    if (!raw) return undefined;
-    if (!raw.startsWith("[")) return raw;
+    return await runYtDlp([...cookies, ...baseArgs]);
+  } catch (error) {
+    console.error("yt-dlp failed with cookies attached, retrying without them:", error);
+    return runYtDlp(baseArgs);
+  }
+}
 
-    const cookies: { name: string; value: string }[] = JSON.parse(raw);
-    return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+interface RawCookie {
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  expirationDate?: number;
+  name: string;
+  value: string;
+}
+
+// A tab or newline inside a field would corrupt the tab-separated format
+const sanitize = (value: string) => value.replace(/[\t\r\n]/g, "");
+
+function toNetscapeCookieFile(cookies: RawCookie[]): string {
+  const lines = ["# Netscape HTTP Cookie File"];
+  for (const cookie of cookies) {
+    if (!cookie?.name || cookie.value === undefined || cookie.value === null) continue;
+
+    const domain = cookie.domain?.startsWith(".") ? cookie.domain : `.${cookie.domain ?? "youtube.com"}`;
+    const expiry = cookie.expirationDate ? Math.floor(cookie.expirationDate) : 0;
+    lines.push(
+      [
+        sanitize(domain),
+        "TRUE",
+        sanitize(cookie.path ?? "/"),
+        cookie.secure ? "TRUE" : "FALSE",
+        expiry,
+        sanitize(cookie.name),
+        sanitize(String(cookie.value)),
+      ].join("\t"),
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+let cookiesFilePath: string | null | undefined;
+
+/**
+ * yt-dlp needs cookies as a Netscape-format file. YOUTUBE_COOKIES_FILE/
+ * YOUTUBE_COOKIES (see .env.example) is either already in that format (e.g.
+ * exported via the "Get cookies.txt LOCALLY" extension) and gets used
+ * directly, or is the EditThisCookie-style JSON array from before and gets
+ * converted into a Netscape file once, cached for the process lifetime.
+ */
+function loadCookiesFilePath(): string | undefined {
+  if (cookiesFilePath !== undefined) return cookiesFilePath ?? undefined;
+
+  const configuredPath = process.env.YOUTUBE_COOKIES_FILE;
+  const inline = process.env.YOUTUBE_COOKIES;
+  if (!configuredPath && !inline) {
+    cookiesFilePath = null;
+    return undefined;
+  }
+
+  try {
+    if (configuredPath && fs.existsSync(configuredPath) && fs.statSync(configuredPath).isDirectory()) {
+      // A very common Docker gotcha: bind-mounting a host path that doesn't
+      // exist creates an empty directory there instead of erroring, so a
+      // typo'd or stale filename silently mounts a directory rather than
+      // failing the container to start.
+      throw new Error(
+        `${configuredPath} is a directory, not a file - check the docker-compose.yml volume mount points at ` +
+          "the right filename (a mounted path that doesn't exist on the host becomes an empty directory)",
+      );
+    }
+
+    const raw = (configuredPath ? fs.readFileSync(configuredPath, "utf8") : inline)!.trim();
+    if (!raw) {
+      cookiesFilePath = null;
+      return undefined;
+    }
+
+    if (!raw.startsWith("[")) {
+      // Already Netscape format (or close enough) - use the configured file
+      // directly if there is one, otherwise write the inline content out.
+      if (configuredPath) {
+        cookiesFilePath = configuredPath;
+      } else {
+        const tmpPath = path.join(os.tmpdir(), "musabotti-youtube-cookies.txt");
+        fs.writeFileSync(tmpPath, raw);
+        cookiesFilePath = tmpPath;
+      }
+      return cookiesFilePath;
+    }
+
+    const cookies: RawCookie[] = JSON.parse(raw);
+    const tmpPath = path.join(os.tmpdir(), "musabotti-youtube-cookies.txt");
+    fs.writeFileSync(tmpPath, toNetscapeCookieFile(cookies));
+    cookiesFilePath = tmpPath;
+    return cookiesFilePath;
   } catch (error) {
     console.error("Failed to load YouTube cookies, continuing without them:", error);
+    cookiesFilePath = null;
     return undefined;
   }
 }
 
-let fallbackInnertube: Promise<InnertubeType> | undefined;
-
-// A signed-in session, used only as a fallback when the anonymous one is
-// rejected. Pinned to the MUSIC (YouTube Music / WEB_REMIX) client rather
-// than IOS: it's a real web-family Google product a signed-in account
-// legitimately authenticates against with browser cookies, unlike IOS, which
-// is a different client/account combination YouTube's anti-abuse system
-// flags precisely because cookie-bearing sessions never show up as "the iOS
-// app" in practice.
-function getFallbackInnertube() {
-  if (!fallbackInnertube) {
-    fallbackInnertube = loadInnertube().then(({ Innertube, ClientType }) =>
-      Innertube.create({
-        cookie: loadCookieHeader(),
-        generate_session_locally: true,
-        client_type: ClientType.MUSIC,
-      }),
-    );
-  }
-  return fallbackInnertube;
+function cookieArgs(): string[] {
+  const filePath = loadCookiesFilePath();
+  return filePath ? ["--cookies", filePath] : [];
 }
 
-async function isReachable(url: string): Promise<boolean> {
-  try {
-    const response = await fetch(url, { headers: { Range: "bytes=0-0" } });
-    return response.ok;
-  } catch {
-    return false;
-  }
+function toTrackInfo(entry: YtDlpEntry): TrackInfo {
+  return {
+    source: "youtube",
+    url: entry.webpage_url ?? entry.url ?? `https://www.youtube.com/watch?v=${entry.id}`,
+    title: entry.title,
+    author: entry.channel ?? entry.uploader ?? "Unknown",
+    durationMs: (entry.duration ?? 0) * 1000,
+    thumbnail: entry.thumbnail ?? entry.thumbnails?.at(-1)?.url,
+    isLive: entry.is_live ?? false,
+  };
 }
 
 /**
- * Resolves a user-provided search term or url into one or more playable tracks.
- * Pure playlist urls (no attached video id) are expanded fully; everything else
- * (video urls or free text) resolves to a single track, the latter via search.
+ * Resolves a user-provided search term or url into one or more playable
+ * tracks. Pure playlist urls (no attached video id) are expanded (up to 100
+ * entries, via yt-dlp's fast --flat-playlist mode - each entry still carries
+ * full metadata for YouTube specifically); everything else (video urls or
+ * free text) resolves to a single track, the latter via search.
  */
 export async function resolve(query: string): Promise<ResolveResult> {
   const isUrl = URL_RE.test(query);
+  const isPlaylist = isUrl && PLAYLIST_ONLY_RE.test(query) && !/[?&]v=/.test(query);
+  const target = isUrl ? query : `ytsearch1:${query}`;
 
-  if (isUrl && PLAYLIST_ONLY_RE.test(query) && !/[?&]v=/.test(query)) {
-    const playlist = await ytpl(query, { limit: 100 });
-    return {
-      isPlaylist: true,
-      tracks: playlist.items.map((item) => ({
-        source: "youtube",
-        url: item.shortUrl,
-        title: item.title,
-        author: item.author?.name ?? "Unknown",
-        durationMs: (item.durationSec ?? 0) * 1000,
-        thumbnail: item.bestThumbnail.url ?? undefined,
-        isLive: item.isLive,
-      })),
-    };
+  const args = [
+    "-j",
+    "--no-warnings",
+    ...(isPlaylist ? ["--flat-playlist", "--playlist-end", "100"] : ["--no-playlist"]),
+    target,
+  ];
+
+  const output = await runYtDlpResilient(args);
+
+  const entries: YtDlpEntry[] = output
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  if (entries.length === 0) {
+    throw new Error(isUrl ? "That url is not a supported YouTube link" : "No results found for that search");
   }
 
-  const videoId = isUrl ? extractVideoId(query) : undefined;
-  if (isUrl && videoId) {
-    return { isPlaylist: false, tracks: [await getTrackInfo(query)] };
-  }
-
-  if (isUrl) throw new Error("That url is not a supported YouTube link");
-
-  const results = await ytsearch(query);
-  const hit = results.videos[0];
-  if (!hit) throw new Error("No results found for that search");
-
-  return {
-    isPlaylist: false,
-    tracks: [
-      {
-        source: "youtube",
-        url: hit.url,
-        title: hit.title,
-        author: hit.author.name,
-        durationMs: hit.duration.seconds * 1000,
-        thumbnail: hit.thumbnail,
-        isLive: hit.duration.seconds === 0,
-      },
-    ],
-  };
-}
-
-export async function getTrackInfo(url: string): Promise<TrackInfo> {
-  const videoId = extractVideoId(url) ?? url;
-  const yt = await getInnertube();
-  const info = await yt.getBasicInfo(videoId);
-  const details = info.basic_info;
-  return {
-    source: "youtube",
-    url: `https://www.youtube.com/watch?v=${videoId}`,
-    title: details.title ?? "Unknown",
-    author: details.author ?? "Unknown",
-    durationMs: (details.duration ?? 0) * 1000,
-    thumbnail: details.thumbnail?.at(-1)?.url,
-    isLive: details.is_live ?? false,
-  };
+  return { isPlaylist, tracks: entries.map(toTrackInfo) };
 }
 
 /**
- * Fetches a fresh direct-stream url for a track. Signed urls expire, so this
- * is re-resolved every time a track (re)starts playback rather than cached.
+ * Streams a track's audio directly from yt-dlp (piped to stdout) rather than
+ * extracting a url for us to fetch separately - yt-dlp's own request crafting
+ * (headers, client selection, PoToken handling) is what actually gets past
+ * YouTube's stricter validation for some videos, so it needs to be the one
+ * doing the real download too, not just handing back a url.
  *
- * A PoToken is attached whenever one can be minted (see potoken.ts) since some
- * videos otherwise 403 on the actual byte fetch even though metadata resolved
- * fine. If that still isn't enough - some videos need a real signed-in
- * account, not just proof of a non-bot client - this falls back to an
- * authenticated session (see getFallbackInnertube), if cookies are configured.
+ * Retries once without cookies if the cookie-attached attempt fails before
+ * producing any data - see runYtDlpResilient's doc comment for why.
  */
-export async function getPlayableUrl(url: string): Promise<string> {
-  const videoId = extractVideoId(url) ?? url;
-  const po_token = await mintPoToken(videoId);
+export function getPlayableStream(url: string, signal: AbortSignal): Readable {
+  const output = new PassThrough();
+  const cookies = cookieArgs();
 
-  const yt = await getInnertube();
-  const format = await yt.getStreamingData(videoId, { type: "audio", quality: "best", po_token });
-  if (format?.url && (await isReachable(format.url))) {
-    console.log(`[ytSource] ${videoId}: using the anonymous session's url`);
-    return format.url;
-  }
-  console.log(`[ytSource] ${videoId}: anonymous session's url was rejected`);
+  const attempt = (useCookies: boolean) => {
+    const args = [
+      "-f",
+      "bestaudio",
+      "--no-playlist",
+      "-o",
+      "-",
+      "--quiet",
+      "--no-warnings",
+      ...(useCookies ? cookies : []),
+      url,
+    ];
 
-  const hasCookies = Boolean(loadCookieHeader());
-  console.log(`[ytSource] ${videoId}: cookies configured: ${hasCookies}`);
-  if (hasCookies) {
-    const ytFallback = await getFallbackInnertube();
-    const fallbackFormat = await ytFallback.getStreamingData(videoId, {
-      type: "audio",
-      quality: "best",
-      po_token,
+    const child = spawn(YTDLP_BIN, args, { signal });
+    let stderr = "";
+    let gotData = false;
+
+    child.stdout.on("data", (chunk) => {
+      gotData = true;
+      output.write(chunk);
     });
-    if (fallbackFormat?.url && (await isReachable(fallbackFormat.url))) {
-      console.log(`[ytSource] ${videoId}: using the authenticated fallback session's url`);
-      return fallbackFormat.url;
-    }
-    console.log(`[ytSource] ${videoId}: authenticated fallback session's url was also rejected`);
-  }
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      console.log(`[yt-dlp] ${chunk.toString().trim()}`);
+    });
 
-  throw new Error("No playable audio stream was found for this track");
+    const onFailure = (error: Error) => {
+      if (useCookies && cookies.length > 0 && !gotData) {
+        console.error("yt-dlp failed with cookies attached before any data arrived, retrying without them:", error);
+        attempt(false);
+      } else {
+        output.destroy(error);
+      }
+    };
+
+    child.on("error", onFailure);
+    child.on("close", (code) => {
+      if (code === 0 || code === null) {
+        output.end();
+      } else {
+        const lastLines = stderr.trim().split("\n").slice(-3).join(" | ");
+        onFailure(new Error(`yt-dlp exited with code ${code}${lastLines ? `: ${lastLines}` : ""}`));
+      }
+    });
+  };
+
+  attempt(cookies.length > 0);
+  return output;
 }

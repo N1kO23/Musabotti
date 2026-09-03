@@ -1,5 +1,7 @@
 import Soundcloud from "soundcloud.ts";
 import type { SoundcloudTrack } from "soundcloud.ts";
+import { Readable } from "stream";
+import { createResumableAudioStream } from "../util/resumableFetch";
 import { ResolveResult, TrackInfo } from "./trackTypes";
 
 const PLAYLIST_RE = /\/sets\//i;
@@ -89,10 +91,15 @@ export async function resolve(query: string): Promise<ResolveResult> {
  * straight to streamLink, which would internally re-resolve it through the
  * same token-dropping tracks.get() path for private/unlisted tracks.
  */
-export async function getPlayableUrl(url: string): Promise<string> {
+async function getPlayableUrl(url: string): Promise<string> {
   const sc = getClient();
   const track = await sc.tracks.getAlt(url);
   const streamUrl = await sc.util.streamLink(track, "progressive");
   if (!streamUrl) throw new Error("This SoundCloud track has no playable stream available");
   return streamUrl;
+}
+
+export async function getPlayableStream(url: string, signal: AbortSignal): Promise<Readable> {
+  const streamUrl = await getPlayableUrl(url);
+  return createResumableAudioStream(streamUrl, signal);
 }

@@ -1,3 +1,4 @@
+import { Readable } from "stream";
 import * as fileSource from "./fileSource";
 import * as soundcloudSource from "./soundcloudSource";
 import { ResolveResult, TrackInfo } from "./trackTypes";
@@ -49,13 +50,20 @@ export async function resolveAttachment(url: string, filename: string): Promise<
   return fileSource.resolveNamed(url, filename);
 }
 
-export async function getPlayableUrl(track: TrackInfo): Promise<string> {
+/**
+ * Starts streaming a track's audio. Each source decides for itself how best
+ * to fetch: YouTube goes through yt-dlp end to end (its own request crafting
+ * is what actually gets past YouTube's validation - see ytSource.ts), while
+ * SoundCloud and direct files resolve a url and fetch it in Node via the
+ * shared resumable-fetch-into-ffmpeg pipeline.
+ */
+export async function getPlayableStream(track: TrackInfo, signal: AbortSignal): Promise<Readable> {
   switch (track.source) {
     case "youtube":
-      return ytSource.getPlayableUrl(track.url);
+      return ytSource.getPlayableStream(track.url, signal);
     case "soundcloud":
-      return soundcloudSource.getPlayableUrl(track.url);
+      return soundcloudSource.getPlayableStream(track.url, signal);
     case "file":
-      return fileSource.getPlayableUrl(track.url);
+      return fileSource.getPlayableStream(track.url, signal);
   }
 }

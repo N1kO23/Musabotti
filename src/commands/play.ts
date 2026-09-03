@@ -2,9 +2,10 @@ import { SlashCommandBuilder } from "discord.js";
 import { ICommand } from "../interfaces";
 import { queueTrack } from "../services/player";
 import { resolve, resolveAttachment } from "../services/trackSource";
-import { createEmbed, createPlaylistEmbed } from "../util";
+import { createEmbed, createPlaylistEmbed, withTimeout } from "../util";
 
 const AUDIO_FILE_EXT_RE = /\.(mp3|wav|ogg|oga|m4a|flac|opus|aac|webm|wma)$/i;
+const RESOLVE_TIMEOUT_MS = 20_000;
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
@@ -50,7 +51,7 @@ const command: ICommand = {
         }
         result = await resolveAttachment(file.url, file.name);
       } else {
-        result = await resolve(query!);
+        result = await withTimeout(resolve(query!), RESOLVE_TIMEOUT_MS);
       }
     } catch (error: any) {
       console.error(`Failed to resolve "${query ?? file?.url}":`, error);

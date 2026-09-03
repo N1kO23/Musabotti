@@ -12,7 +12,6 @@ import {
 } from "@discordjs/voice";
 import { Client, Collection, TextChannel } from "discord.js";
 import { FFmpeg } from "prism-media";
-import { createResumableAudioStream } from "../util/resumableFetch";
 import { Context } from "../classes/context";
 import { createNowPlayingEmbed } from "../util";
 import { shuffleArray } from "../util";
@@ -22,7 +21,7 @@ import {
   buildFilterChain,
   defaultFilterState,
 } from "../util/ffmpegFilters";
-import { TrackInfo, getPlayableUrl } from "./trackSource";
+import { TrackInfo, getPlayableStream } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 
@@ -319,7 +318,7 @@ class PlayerManager {
     const channel = this.client.channels.cache.get(track.queuedFromChannelId) as TextChannel;
     if (!channel?.isTextBased()) return;
     await channel
-      .send(`⚠️ Couldn't play **${track.track.title}** - YouTube blocked the request. Skipping.`)
+      .send(`⚠️ Couldn't play **${track.track.title}**. Skipping.`)
       .catch((sendError) => console.error("Failed to report playback failure:", sendError));
   }
 
@@ -328,34 +327,32 @@ class PlayerManager {
    * the current filter state. Used for the initial play, skip, seek and
    * whenever a filter/volume change requires restarting the audio pipeline.
    *
-   * The audio bytes are fetched here in Node (not by ffmpeg itself) and piped
-   * into ffmpeg's stdin. YouTube's signed stream urls are bound to the IP
-   * that requested them; ffmpeg is a separate process with its own network
-   * stack, and in a container that can resolve/egress differently than Node
-   * does, causing YouTube to 403 a request from a "different" IP for the same
-   * url. Fetching in the same process that obtained the url guarantees they
-   * match. The tradeoff is that seeking becomes a decode-and-discard (-ss
-   * after -i) instead of an efficient input-side seek, since a piped stream
-   * isn't seekable - acceptable for a music bot's typical seek distances.
+   * Each source decides for itself how to actually fetch the audio (see
+   * trackSource.getPlayableStream) - this just pipes whatever stream it gets
+   * into ffmpeg's stdin. The tradeoff is that seeking becomes a decode-and-
+   * discard (-ss after -i) instead of an efficient input-side seek, since a
+   * piped stream isn't seekable - acceptable for a music bot's typical seek
+   * distances.
    */
   private async playCurrentTrack(startMs: number) {
     if (!this.currentTrack) return;
     const trackAtStart = this.currentTrack;
 
-    const url = await getPlayableUrl(this.currentTrack.track);
-    const filterArgs = buildFilterChain(this.filters);
-
     this.fetchAbort?.abort();
     this.fetchAbort = new AbortController();
-    const inputStream = createResumableAudioStream(url, this.fetchAbort.signal);
+    const inputStream = await getPlayableStream(this.currentTrack.track, this.fetchAbort.signal);
+    const filterArgs = buildFilterChain(this.filters);
 
     // Fires if the fetch permanently fails (e.g. exhausts its retries) after
     // playback had already started, i.e. too late for the caller's own
     // try/catch. Only act on it if this is still the track actually playing -
     // an older, already-superseded pipeline (skip/seek/filter change) can
-    // still emit a late error after being destroyed.
+    // still emit a late error after being destroyed. Guarded against firing
+    // twice for the same attempt (e.g. both the fetch and ffmpeg erroring).
+    let failureHandled = false;
     const onPlaybackFailure = (error: unknown) => {
-      if (this.currentTrack !== trackAtStart) return;
+      if (failureHandled || this.currentTrack !== trackAtStart) return;
+      failureHandled = true;
       this.reportPlaybackFailure(trackAtStart, error).catch(() => {});
       this.currentTrack = undefined;
     };

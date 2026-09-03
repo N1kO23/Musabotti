@@ -5,6 +5,7 @@ import {
   InteractionEditReplyOptions,
   InteractionReplyOptions,
 } from "discord.js";
+import { createMessageEmbed } from "../util/messageEmbed";
 
 type ReplyOptions = string | (InteractionReplyOptions & InteractionEditReplyOptions);
 
@@ -29,15 +30,19 @@ export class Context {
   /**
    * Replies to the interaction, filling in the "thinking..." placeholder left
    * by deferReply() if one is pending, or sending a follow-up if it already
-   * has a reply.
+   * has a reply. A plain string gets wrapped in an embed rather than sent as
+   * raw message content - some of these messages interpolate text pulled
+   * from external sources (track titles, filenames), and Discord parses
+   * @everyone/@here/role mentions in message content but never inside embeds.
    */
   async reply(options: ReplyOptions) {
+    const payload = typeof options === "string" ? { embeds: [createMessageEmbed(options)] } : options;
     if (this.interaction.deferred) {
-      return this.interaction.editReply(options);
+      return this.interaction.editReply(payload);
     }
     if (this.interaction.replied) {
-      return this.interaction.followUp(options);
+      return this.interaction.followUp(payload);
     }
-    return this.interaction.reply(options);
+    return this.interaction.reply(payload);
   }
 }

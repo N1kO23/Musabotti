@@ -17,7 +17,7 @@ import {
 } from "discord.js";
 import { getCommands } from "./commands";
 import { ICommand } from "./interfaces";
-import { verifyConditions } from "./util";
+import { createMessageEmbed, verifyConditions } from "./util";
 import { Context } from "./classes/context";
 
 import * as dotenv from "dotenv";
@@ -68,13 +68,13 @@ client.on(Events.GuildDelete, async (guild) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.guildId) {
-    await interaction.reply("Commands can only be used in a server!");
+    await interaction.reply({ embeds: [createMessageEmbed("Commands can only be used in a server!")] });
     return;
   }
 
   const commandInstance = commands.get(interaction.commandName);
   if (!commandInstance) {
-    await interaction.reply("Whaa...? I don't understand that command");
+    await interaction.reply({ embeds: [createMessageEmbed("Whaa...? I don't understand that command")] });
     return;
   }
 

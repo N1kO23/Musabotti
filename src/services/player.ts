@@ -13,7 +13,7 @@ import {
 import { Client, Collection, TextChannel } from "discord.js";
 import { FFmpeg } from "prism-media";
 import { Context } from "../classes/context";
-import { createNowPlayingEmbed } from "../util";
+import { createMessageEmbed, createNowPlayingEmbed } from "../util";
 import { shuffleArray } from "../util";
 import {
   FilterState,
@@ -318,7 +318,7 @@ class PlayerManager {
     const channel = this.client.channels.cache.get(track.queuedFromChannelId) as TextChannel;
     if (!channel?.isTextBased()) return;
     await channel
-      .send(`⚠️ Couldn't play **${track.track.title}**. Skipping.`)
+      .send({ embeds: [createMessageEmbed(`⚠️ Couldn't play **${track.track.title}**. Skipping.`)] })
       .catch((sendError) => console.error("Failed to report playback failure:", sendError));
   }
 

@@ -151,6 +151,9 @@ class PlayerManager {
   }
 
   private handleIdle() {
+    console.log(
+      `[guild ${this.guildId}] handleIdle fired (restarting: ${this.restarting}, queue length: ${this.queue.length}, loop: ${this.loop})`,
+    );
     if (this.restarting) {
       this.restarting = false;
       return;

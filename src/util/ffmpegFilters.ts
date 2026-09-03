@@ -87,7 +87,12 @@ function buildTimescale(timescale: TimescaleSettings): string[] {
   const filters: string[] = [];
 
   if (totalPitch !== 1) {
-    filters.push(`asetrate=48000*${totalPitch.toFixed(4)}`, "aresample=48000");
+    // asetrate reinterprets existing samples at a new rate without resampling
+    // first, so it has to start from a known rate - source audio is often
+    // 44100Hz (or other rates), not already 48000Hz, and skipping this
+    // resample compounds the mismatch into the pitch/tempo shift itself
+    // (e.g. a 44100Hz source made every effect ~9% stronger than requested).
+    filters.push("aresample=48000", `asetrate=48000*${totalPitch.toFixed(4)}`, "aresample=48000");
   }
   const tempoAfterPitchShift = totalTempo / totalPitch;
   if (tempoAfterPitchShift !== 1) {

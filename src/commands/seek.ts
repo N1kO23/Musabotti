@@ -1,34 +1,41 @@
-import { EmbedBuilder, SlashCommandBuilder } from "discord.js";
+import { SlashCommandBuilder } from "discord.js";
 import { CONDITIONS, ICommand } from "../interfaces";
-import { getPlayer } from "../services/player";
+import { getPlayerInstance } from "../services/player";
+import { parseTimestamp, timeConvert2 } from "../util";
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
     .setName("seek")
-    .setDescription("Seeks to desired time of the song")
-    .addNumberOption((option) =>
+    .setDescription("Jumps to a time in the current song")
+    .addStringOption((option) =>
       option
-        .setName("timestamp")
-        .setDescription("The timestamp to jump to in seconds (can do decimal accuracy)")
+        .setName("time")
+        .setDescription("Where to jump to, e.g. 1:23 or 83 (seconds)")
         .setRequired(true),
     ),
-  conditions: [CONDITIONS.SameVoice],
+  conditions: [CONDITIONS.SameVoice, CONDITIONS.PlayerExists],
   execute: async (context, interaction) => {
-    const player = await getPlayer(context.client, { context, noCreate: true });
-    if (!player) {
-      await context.reply("I am not connected to any voice channels!");
+    const player = getPlayerInstance(context.guildId);
+    const track = player.getCurrentTrack()?.track;
+    if (!track) {
+      await context.reply("Nothing is playing!");
       return;
     }
 
-    const timestamp = interaction.options.getNumber("timestamp", true);
-    const targetMs = timestamp * 1000;
+    const input = interaction.options.getString("time", true);
+    const targetMs = parseTimestamp(input);
+    if (targetMs === undefined) {
+      await context.reply(`"${input}" isn't a time I understand, try something like 1:23 or 83`);
+      return;
+    }
+    if (track.durationMs && !track.isLive && targetMs >= track.durationMs) {
+      await context.reply(
+        `That's past the end of the song (it's ${timeConvert2(track.durationMs)} long)`,
+      );
+      return;
+    }
 
-    const embed = new EmbedBuilder()
-      .setColor("DarkBlue")
-      .setTitle("Seek")
-      .addFields({ name: "Timestamp", value: targetMs.toString() });
-
-    await context.reply({ embeds: [embed] });
+    await context.reply(`⏩ Jumped to ${timeConvert2(targetMs)}`);
     await player.seekSong(targetMs);
   },
 };

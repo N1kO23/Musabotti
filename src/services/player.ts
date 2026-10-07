@@ -28,6 +28,8 @@ import { TrackInfo, getPlayableUrl } from "./trackSource";
 const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
 
+export type LoopMode = "off" | "track" | "queue";
+
 export class TrackExt {
   track: TrackInfo;
   queuedFromChannelId?: string;
@@ -82,10 +84,14 @@ async function createPlayerManager(
   const player = new PlayerManager(guildId, client);
   await player.createPlayer(channelId);
   players.set(guildId, player);
+  // Voice updates during the join arrived before the player was registered
+  player.checkListeners();
   return player;
 }
 
 export const hasPlayer = (guildId: string) => players.has(guildId);
+
+export const findPlayer = (guildId: string) => players.get(guildId);
 
 export const getPlayerInstance = (guildId: string) => {
   const player = players.get(guildId);
@@ -130,9 +136,10 @@ class PlayerManager {
   private client: Client;
   private guildId: string;
   private queue: TrackExt[] = [];
-  private loop = false;
+  private loopMode: LoopMode = "off";
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
+  private aloneTimeoutId?: NodeJS.Timeout;
   private timeoutDuration = Number.parseInt(
     process.env.TIMEOUT_DURATION ?? "30000",
     10,
@@ -192,6 +199,8 @@ class PlayerManager {
   private stopWithoutAdvancing() {
     // Also cancels a track still resolving its url, so it doesn't start anyway
     this.playGeneration++;
+    this.fetchAbort?.abort();
+    this.ffmpeg?.destroy();
     this.stopping = true;
     this.audioPlayer.stop(true);
     this.stopping = false;
@@ -216,6 +225,37 @@ class PlayerManager {
       clearTimeout(this.timeoutId);
       this.timeoutId = null;
     }
+  }
+
+  /**
+   * Starts the auto-disconnect countdown once nobody but bots is left in the
+   * bot's voice channel, and cancels it when someone comes back. Called on
+   * every voice state update in the guild.
+   */
+  checkListeners() {
+    const guild = this.client.guilds.cache.get(this.guildId);
+    const channelId = guild?.members.me?.voice.channelId;
+    // A voice state without a cached member counts as a listener, so a cache
+    // gap can't make the bot leave on people
+    const hasListeners = guild?.voiceStates.cache.some(
+      (state) => state.channelId === channelId && !state.member?.user.bot,
+    );
+
+    if (channelId && hasListeners) {
+      if (this.aloneTimeoutId) {
+        console.log(`Listeners are back on server ${this.guildId}`);
+        clearTimeout(this.aloneTimeoutId);
+        this.aloneTimeoutId = undefined;
+      }
+      return;
+    }
+    if (this.aloneTimeoutId) return;
+
+    console.log(`Bot left alone on server ${this.guildId}`);
+    this.aloneTimeoutId = setTimeout(() => {
+      console.log(`Bot disconnected due to an empty channel on server ${this.guildId}`);
+      this.destroy();
+    }, this.timeoutDuration);
   }
 
   /**
@@ -266,6 +306,7 @@ class PlayerManager {
     this.destroyed = true;
     this.playGeneration++;
     this.stopMonitoring();
+    clearTimeout(this.aloneTimeoutId);
     this.fetchAbort?.abort();
     this.ffmpeg?.destroy();
     this.audioPlayer.stop(true);
@@ -303,14 +344,56 @@ class PlayerManager {
     if (!this.currentTrack) await this.nextTrack({ sendEmbed: true });
   }
 
-  toggleLoop() {
-    this.loop = !this.loop;
-    return this.loop;
+  getLoopMode() {
+    return this.loopMode;
+  }
+
+  setLoopMode(mode: LoopMode) {
+    this.loopMode = mode;
   }
 
   shuffleQueue() {
     this.queue = shuffleArray(this.queue);
     return true;
+  }
+
+  /** Converts a 1-based "Up next" position into a queue index */
+  private toQueueIndex(position: number) {
+    if (!Number.isInteger(position) || position < 1 || position > this.queue.length) {
+      throw new Error(
+        `There's no song at position ${position}, the queue has ${this.queue.length}`,
+      );
+    }
+    return position - 1;
+  }
+
+  removeFromQueue(position: number) {
+    const [removed] = this.queue.splice(this.toQueueIndex(position), 1);
+    return removed;
+  }
+
+  moveInQueue(from: number, to: number) {
+    const fromIndex = this.toQueueIndex(from);
+    const toIndex = this.toQueueIndex(to);
+    const [moved] = this.queue.splice(fromIndex, 1);
+    this.queue.splice(toIndex, 0, moved);
+    return moved;
+  }
+
+  /** Empties the upcoming queue, leaving the current track playing */
+  clearQueue() {
+    const removed = this.queue.length;
+    this.queue = [];
+    return removed;
+  }
+
+  /** Stops playback and empties the queue, staying in the voice channel */
+  stop() {
+    this.queue = [];
+    this.currentTrack = undefined;
+    this.pausedAt = undefined;
+    this.stopWithoutAdvancing();
+    this.startMonitoring();
   }
 
   async seekSong(targetMs: number) {
@@ -319,8 +402,22 @@ class PlayerManager {
     return true;
   }
 
+  /** Skipping means wanting to hear something, so it also resumes a paused player */
   async skipSong() {
+    this.pausedAt = undefined;
     await this.nextTrack({ forceSkip: true, sendEmbed: true });
+  }
+
+  async skipTo(position: number) {
+    const skipped = this.queue.splice(0, this.toQueueIndex(position));
+    if (this.loopMode === "queue") {
+      // Keep the loop's order: the current track, then the ones jumped over,
+      // go round to the back. Cleared so nextTrack doesn't requeue it again.
+      if (this.currentTrack) this.queue.push(this.currentTrack);
+      this.queue.push(...skipped);
+      this.currentTrack = undefined;
+    }
+    await this.skipSong();
   }
 
   private async nextTrack(options: {
@@ -328,7 +425,9 @@ class PlayerManager {
     sendEmbed?: boolean;
   }) {
     const previousTrack = this.currentTrack;
-    if ((!this.currentTrack && this.loop) || !this.loop || options.forceSkip) {
+    if (this.loopMode !== "track" || !previousTrack || options.forceSkip) {
+      // Failed tracks are cleared before getting here, so they don't loop
+      if (this.loopMode === "queue" && previousTrack) this.queue.push(previousTrack);
       this.currentTrack = this.queue.shift();
     }
     if (!this.currentTrack) {
@@ -498,7 +597,7 @@ class PlayerManager {
   }
 
   /** Position within the track itself, which only matches wall-clock time at 1x speed */
-  private getPositionMs() {
+  getPositionMs() {
     if (!this.segmentStartedAt) return 0;
     const now = this.pausedAt ?? Date.now();
     return this.positionOffsetMs + (now - this.segmentStartedAt) * this.segmentTempo;
@@ -515,6 +614,14 @@ class PlayerManager {
 
   getCurrentTrack() {
     return this.currentTrack;
+  }
+
+  isPaused() {
+    return Boolean(this.pausedAt);
+  }
+
+  getVolume() {
+    return this.filters.volume;
   }
 
   /**

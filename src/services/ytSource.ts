@@ -136,24 +136,24 @@ export async function resolve(query: string): Promise<ResolveResult> {
 
   if (isUrl) throw new Error("That url is not a supported YouTube link");
 
-  const results = await ytsearch(query);
-  const hit = results.videos[0];
+  const [hit] = await search(query, 1);
   if (!hit) throw new Error("No results found for that search");
 
-  return {
-    isPlaylist: false,
-    tracks: [
-      {
-        source: "youtube",
-        url: hit.url,
-        title: hit.title,
-        author: hit.author.name,
-        durationMs: hit.duration.seconds * 1000,
-        thumbnail: hit.thumbnail,
-        isLive: hit.duration.seconds === 0,
-      },
-    ],
-  };
+  return { isPlaylist: false, tracks: [hit] };
+}
+
+/** Keyword search, best match first */
+export async function search(query: string, limit: number): Promise<TrackInfo[]> {
+  const results = await ytsearch(query);
+  return results.videos.slice(0, limit).map((video) => ({
+    source: "youtube",
+    url: video.url,
+    title: video.title,
+    author: video.author.name,
+    durationMs: video.duration.seconds * 1000,
+    thumbnail: video.thumbnail,
+    isLive: video.duration.seconds === 0,
+  }));
 }
 
 export async function getTrackInfo(url: string): Promise<TrackInfo> {

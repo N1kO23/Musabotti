@@ -30,6 +30,18 @@ export const timeConvert = (time: number): string => {
   return result;
 };
 
+/**
+ * Parses a user-typed time like "83", "83.5", "1:23" or "1:02:03" into
+ * milliseconds. Returns undefined for anything else.
+ */
+export const parseTimestamp = (input: string): number | undefined => {
+  const parts = input.trim().split(":");
+  if (parts.length > 3 || parts.some((part) => !/^\d+(\.\d+)?$/.test(part))) {
+    return undefined;
+  }
+  return parts.reduce((seconds, part) => seconds * 60 + Number(part), 0) * 1000;
+};
+
 export const timeConvert2 = (milliseconds: number): string => {
   const seconds = Math.floor((milliseconds / 1000) % 60);
   const minutes = Math.floor((milliseconds / (1000 * 60)) % 60);

@@ -2,8 +2,14 @@ import play from "./play";
 import disconnect from "./disconnect";
 import invite from "./invite";
 import skip from "./skip";
+import skipto from "./skipto";
 import help from "./help";
 import queue from "./queue";
+import nowplaying from "./nowplaying";
+import remove from "./remove";
+import move from "./move";
+import clearQueue from "./clearQueue";
+import stop from "./stop";
 import volume from "./volume";
 import clearFilters from "./clearFilters";
 import timescale from "./timescale";
@@ -21,17 +27,23 @@ const commands: ICommand[] = [
   disconnect,
   invite,
   play,
+  pause,
   skip,
-  help,
+  skipto,
+  stop,
+  seek,
+  nowplaying,
   queue,
+  remove,
+  move,
+  shuffle,
+  clearQueue,
+  loop,
+  help,
   volume,
   clearFilters,
   timescale,
   bassboost,
-  loop,
-  pause,
-  shuffle,
-  seek,
   lofi,
   nightcore,
   hardcore,

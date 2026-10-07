@@ -1,10 +1,53 @@
-import { SlashCommandBuilder } from "discord.js";
+import { ApplicationCommandOptionChoiceData, SlashCommandBuilder } from "discord.js";
 import { ICommand } from "../interfaces";
 import { queueTrack } from "../services/player";
-import { resolve, resolveAttachment } from "../services/trackSource";
-import { createEmbed, createPlaylistEmbed } from "../util";
+import { resolve, resolveAttachment, searchSuggestions } from "../services/trackSource";
+import {
+  createEmbed,
+  createPlaylistEmbed,
+  timeConvert2,
+  truncateString,
+  withTimeout,
+} from "../util";
 
 const AUDIO_FILE_EXT_RE = /\.(mp3|wav|ogg|oga|m4a|flac|opus|aac|webm|wma)$/i;
+
+const SUGGESTION_LIMIT = 5;
+const SUGGESTION_MIN_QUERY_LENGTH = 3;
+// Discord discards autocomplete responses that take longer than 3s
+const SUGGESTION_TIMEOUT_MS = 2500;
+const SUGGESTION_CACHE_SIZE = 100;
+// Discord caps both a choice's label and its value at 100 characters
+const CHOICE_MAX_LENGTH = 100;
+
+// Typing sends a request per keystroke, often repeating earlier queries
+const suggestionCache = new Map<string, ApplicationCommandOptionChoiceData<string>[]>();
+
+async function getSuggestions(query: string) {
+  const key = query.toLowerCase();
+  const cached = suggestionCache.get(key);
+  if (cached) return cached;
+
+  const tracks = await withTimeout(
+    searchSuggestions(query, SUGGESTION_LIMIT),
+    SUGGESTION_TIMEOUT_MS,
+  );
+  const choices = tracks
+    .filter((track) => track.url.length <= CHOICE_MAX_LENGTH)
+    .map((track) => {
+      const length = track.isLive ? "live" : timeConvert2(track.durationMs);
+      return {
+        name: truncateString(`${track.title} - ${track.author} (${length})`, CHOICE_MAX_LENGTH),
+        value: track.url,
+      };
+    });
+
+  if (suggestionCache.size >= SUGGESTION_CACHE_SIZE) {
+    suggestionCache.delete(suggestionCache.keys().next().value!);
+  }
+  suggestionCache.set(key, choices);
+  return choices;
+}
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
@@ -14,6 +57,7 @@ const command: ICommand = {
       option
         .setName("song")
         .setDescription("Song name, YouTube/SoundCloud url, audio file url, or 'scsearch:query'")
+        .setAutocomplete(true)
         .setRequired(false),
     )
     .addAttachmentOption((option) =>
@@ -68,6 +112,26 @@ const command: ICommand = {
       await context.reply({ embeds: [createEmbed(track)] });
       await queueTrack(context.client, track, context);
     }
+  },
+  autocomplete: async (interaction) => {
+    const query = interaction.options.getFocused().trim();
+    // Links and SoundCloud searches go through as typed
+    if (
+      query.length < SUGGESTION_MIN_QUERY_LENGTH ||
+      /^https?:\/\//i.test(query) ||
+      /^scsearch:/i.test(query)
+    ) {
+      await interaction.respond([]);
+      return;
+    }
+
+    let choices: ApplicationCommandOptionChoiceData<string>[] = [];
+    try {
+      choices = await getSuggestions(query);
+    } catch (error) {
+      console.error(`Failed to get suggestions for "${query}":`, error);
+    }
+    await interaction.respond(choices);
   },
 };
 

@@ -12,9 +12,9 @@ import {
 } from "@discordjs/voice";
 import { Client, Collection, TextChannel } from "discord.js";
 import { FFmpeg } from "prism-media";
-import { createResumableAudioStream } from "../util/resumableFetch";
+import { Readable } from "stream";
 import { Context } from "../classes/context";
-import { createNowPlayingEmbed } from "../util";
+import { createMessageEmbed, createNowPlayingEmbed, formatTitle } from "../util";
 import { shuffleArray } from "../util";
 import {
   FilterState,
@@ -23,7 +23,7 @@ import {
   defaultFilterState,
   playbackTempo,
 } from "../util/ffmpegFilters";
-import { TrackInfo, getPlayableUrl } from "./trackSource";
+import { TrackInfo, getPlayableStream } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
@@ -168,7 +168,14 @@ class PlayerManager {
     // asynchronously after play(). Re-applying it here keeps a restart
     // (seek/filter change/skip) or a /pause during that window from audibly
     // resuming playback. Emitted synchronously, so no audio slips through.
-    this.audioPlayer.on(AudioPlayerStatus.Playing, () => {
+    this.audioPlayer.on(AudioPlayerStatus.Playing, (oldState) => {
+      // A new pipeline's position clock starts once its audio actually does:
+      // yt-dlp takes a few seconds to deliver the first bytes, which would
+      // otherwise count as played (and get skipped on the next filter change)
+      if (oldState.status === AudioPlayerStatus.Buffering) {
+        this.segmentStartedAt = Date.now();
+        if (this.pausedAt) this.pausedAt = this.segmentStartedAt;
+      }
       if (this.pausedAt) this.audioPlayer.pause();
     });
     this.audioPlayer.on("error", (error) => {
@@ -185,6 +192,9 @@ class PlayerManager {
   }
 
   private handleIdle() {
+    console.log(
+      `[guild ${this.guildId}] handleIdle fired (stopping: ${this.stopping}, destroyed: ${this.destroyed}, queue length: ${this.queue.length}, loop: ${this.loopMode})`,
+    );
     if (this.stopping || this.destroyed) return;
     this.nextTrack({ sendEmbed: true }).catch((error) =>
       console.error(`[guild ${this.guildId}] Failed to advance the queue:`, error),
@@ -479,7 +489,7 @@ class PlayerManager {
   private async reportPlaybackFailure(track: TrackExt, error: unknown) {
     console.error(`Failed to play "${track.track.title}":`, error);
     await this.getAnnouncementChannel(track)
-      ?.send(`⚠️ Couldn't play **${track.track.title}**. Skipping.`)
+      ?.send({ embeds: [createMessageEmbed(`⚠️ Couldn't play ${formatTitle(track.track)}. Skipping.`)] })
       .catch((sendError) => console.error("Failed to report playback failure:", sendError));
   }
 
@@ -489,15 +499,11 @@ class PlayerManager {
    * state. Used for the initial play, skip, seek and whenever a filter/volume
    * change requires restarting the audio pipeline.
    *
-   * The audio bytes are fetched here in Node (not by ffmpeg itself) and piped
-   * into ffmpeg's stdin. YouTube's signed stream urls are bound to the IP
-   * that requested them; ffmpeg is a separate process with its own network
-   * stack, and in a container that can resolve/egress differently than Node
-   * does, causing YouTube to 403 a request from a "different" IP for the same
-   * url. Fetching in the same process that obtained the url guarantees they
-   * match. The tradeoff is that seeking becomes a decode-and-discard instead
-   * of an efficient input-side seek, since a piped stream isn't seekable -
-   * acceptable for a music bot's typical seek distances.
+   * Each source decides for itself how to actually fetch the audio (see
+   * trackSource.getPlayableStream) - this just pipes whatever stream it gets
+   * into ffmpeg's stdin. The tradeoff is that seeking becomes a decode-and-
+   * discard instead of an efficient input-side seek, since a piped stream
+   * isn't seekable - acceptable for a music bot's typical seek distances.
    */
   private async playCurrentTrack(startMs?: number) {
     if (!this.currentTrack) return;
@@ -505,26 +511,33 @@ class PlayerManager {
     const generation = ++this.playGeneration;
 
     // A newer skip/seek/filter change, a stop or a disconnect may happen while
-    // the url resolves. Starting this one anyway would play over it, and its
-    // failure no longer matters either.
-    let url: string;
+    // the stream is being set up (e.g. resolving a SoundCloud url). Starting
+    // this one anyway would play over it, and its failure no longer matters
+    // either. The old pipeline keeps playing until then.
+    const fetchAbort = new AbortController();
+    let inputStream: Readable;
     try {
-      url = await getPlayableUrl(trackAtStart.track);
+      inputStream = await getPlayableStream(trackAtStart.track, fetchAbort.signal);
     } catch (error) {
+      fetchAbort.abort();
       if (generation !== this.playGeneration) return;
       throw error;
     }
-    if (generation !== this.playGeneration) return;
+    if (generation !== this.playGeneration) {
+      // Aborting makes some sources error the stream, which would crash the
+      // process if nothing were listening
+      inputStream.on("error", () => {});
+      fetchAbort.abort();
+      return;
+    }
 
-    // Taken after resolving the url so the old pipeline's playback during
+    // Taken after setting up the stream so the old pipeline's playback during
     // that time isn't replayed
     const positionMs = startMs ?? this.getPositionMs();
     const filterArgs = buildFilterChain(this.filters);
 
     this.fetchAbort?.abort();
-    const fetchAbort = new AbortController();
     this.fetchAbort = fetchAbort;
-    const inputStream = createResumableAudioStream(url, fetchAbort.signal);
 
     const args = [
       "-loglevel",
@@ -599,6 +612,8 @@ class PlayerManager {
   /** Position within the track itself, which only matches wall-clock time at 1x speed */
   getPositionMs() {
     if (!this.segmentStartedAt) return 0;
+    // Still waiting on a new pipeline's first audio (see the Playing listener)
+    if (this.audioPlayer.state.status === AudioPlayerStatus.Buffering) return this.positionOffsetMs;
     const now = this.pausedAt ?? Date.now();
     return this.positionOffsetMs + (now - this.segmentStartedAt) * this.segmentTempo;
   }

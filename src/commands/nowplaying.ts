@@ -1,14 +1,14 @@
 import { SlashCommandBuilder } from "discord.js";
 import { CONDITIONS, ICommand } from "../interfaces";
 import { getPlayerInstance } from "../services/player";
-import { createPlaybackEmbed } from "../util";
+import { createPlaybackEmbed, createPlayerControls } from "../util";
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
     .setName("nowplaying")
     .setDescription("Shows the current song and how far into it we are"),
   conditions: [CONDITIONS.PlayerExists],
-  execute: async (context) => {
+  execute: async (context, interaction) => {
     const player = getPlayerInstance(context.guildId);
     const current = player.getCurrentTrack();
     if (!current) {
@@ -21,7 +21,14 @@ const command: ICommand = {
       loopMode: player.getLoopMode(),
       volume: player.getVolume(),
     });
-    await context.reply({ embeds: [embed] });
+    const response = await interaction.reply({
+      embeds: [embed],
+      components: createPlayerControls(player.getControlsState()),
+      withResponse: true,
+    });
+    // Fresh controls at the bottom of the chat, replacing the older set
+    const message = response.resource?.message;
+    if (message) player.setControlsMessage(message);
   },
 };
 

@@ -1,6 +1,16 @@
+import { Guild, GuildMember } from "discord.js";
 import { CONDITIONS } from "../interfaces";
 import { Context } from "../classes/context";
 import { getPlayerInstance, hasPlayer } from "../services/player";
+
+/** Whether someone is listening in the voice channel the bot is in */
+export const isInBotVoiceChannel = (
+  member: GuildMember | null | undefined,
+  guild: Guild | null,
+) => {
+  const botChannelId = guild?.members.me?.voice.channelId;
+  return Boolean(botChannelId && member?.voice.channelId === botChannelId);
+};
 
 export const verifyConditions = (
   conditions: CONDITIONS[],
@@ -9,13 +19,7 @@ export const verifyConditions = (
   conditions.forEach((cond) => {
     switch (cond) {
       case CONDITIONS.SameVoice: {
-        const me = context.interaction.guild?.members.me;
-        const memberChannelId = context.member?.voice.channelId;
-        if (
-          !memberChannelId ||
-          !me?.voice.channelId ||
-          memberChannelId !== me.voice.channelId
-        ) {
+        if (!isInBotVoiceChannel(context.member, context.interaction.guild)) {
           throw new Error("You are not in the same voice channel as the bot!");
         }
         break;

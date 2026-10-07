@@ -14,6 +14,7 @@ const command: ICommand = {
       return;
     }
     const paused = player.togglePausePlayer();
+    player.refreshControls();
     await context.reply(paused ? "Playback paused!" : "Playback resumed!");
   },
 };

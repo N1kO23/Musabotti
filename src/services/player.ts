@@ -10,11 +10,16 @@ import {
   entersState,
   joinVoiceChannel,
 } from "@discordjs/voice";
-import { Client, Collection, TextChannel } from "discord.js";
+import { Client, Collection, Message, TextChannel } from "discord.js";
 import { FFmpeg } from "prism-media";
 import { PassThrough, Readable } from "stream";
 import { Context } from "../classes/context";
-import { createMessageEmbed, createNowPlayingEmbed, formatTitle } from "../util";
+import {
+  createMessageEmbed,
+  createNowPlayingEmbed,
+  createPlayerControls,
+  formatTitle,
+} from "../util";
 import { shuffleArray } from "../util";
 import {
   FilterState,
@@ -30,6 +35,17 @@ const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
 
 export type LoopMode = "off" | "track" | "queue";
+
+const NEXT_LOOP_MODE: Record<LoopMode, LoopMode> = {
+  off: "track",
+  track: "queue",
+  queue: "off",
+};
+
+// How many finished tracks ⏮ back can return to
+const HISTORY_LIMIT = 50;
+// Further into a track than this, ⏮ back restarts it instead of going to the previous one
+const RESTART_THRESHOLD_MS = 5000;
 
 /** A pipeline's audio input, and how to stop it once the pipeline is replaced */
 interface PipelineInput {
@@ -143,6 +159,10 @@ class PlayerManager {
   private client: Client;
   private guildId: string;
   private queue: TrackExt[] = [];
+  // Finished tracks, most recent last, for ⏮ back
+  private history: TrackExt[] = [];
+  // The message whose buttons control this player (see setControlsMessage)
+  private controlsMessage?: Message;
   private loopMode: LoopMode = "off";
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
@@ -224,6 +244,8 @@ class PlayerManager {
     this.input = undefined;
     this.ffmpeg?.destroy();
     this.discardDownload();
+    // Nothing left for the buttons to control (the queue ran out, or /stop)
+    this.clearControls();
     this.stopping = true;
     this.audioPlayer.stop(true);
     this.stopping = false;
@@ -333,6 +355,7 @@ class PlayerManager {
     this.input?.close();
     this.ffmpeg?.destroy();
     this.discardDownload();
+    this.clearControls();
     this.audioPlayer.stop(true);
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
@@ -376,6 +399,12 @@ class PlayerManager {
 
   setLoopMode(mode: LoopMode) {
     this.loopMode = mode;
+  }
+
+  /** Off → song → queue → off */
+  cycleLoopMode() {
+    this.loopMode = NEXT_LOOP_MODE[this.loopMode];
+    return this.loopMode;
   }
 
   shuffleQueue() {
@@ -446,6 +475,76 @@ class PlayerManager {
     await this.skipSong();
   }
 
+  /**
+   * ⏮ back, the way most music players do it: restarts the current track,
+   * unless it only just started - then goes to the one before it.
+   */
+  async goBack(): Promise<"restarted" | "previous"> {
+    if (this.currentTrack && (this.getPositionMs() > RESTART_THRESHOLD_MS || !this.history.length)) {
+      await this.seekSong(0);
+      return "restarted";
+    }
+    const previous = this.history.pop();
+    if (!previous) throw new Error("There's nothing to go back to");
+
+    // With the queue looping, it also went round to the back of the queue
+    if (this.loopMode === "queue") {
+      const requeued = this.queue.lastIndexOf(previous);
+      if (requeued !== -1) this.queue.splice(requeued, 1);
+    }
+    // The current track becomes the next one again. Cleared so nextTrack
+    // neither adds it to the history nor requeues it.
+    if (this.currentTrack) this.queue.unshift(this.currentTrack);
+    this.queue.unshift(previous);
+    this.currentTrack = undefined;
+    await this.skipSong();
+    return "previous";
+  }
+
+  /** ⏪/⏩: jumps relative to the current position. Past the end means the next track. */
+  async seekBy(deltaMs: number): Promise<"seeked" | "skipped"> {
+    const track = this.currentTrack?.track;
+    if (!track) throw new Error("Nothing is playing!");
+    if (track.isLive) throw new Error("Can't seek in a live stream");
+    const targetMs = Math.max(0, this.getPositionMs() + deltaMs);
+    if (track.durationMs && targetMs >= track.durationMs) {
+      await this.skipSong();
+      return "skipped";
+    }
+    await this.seekSong(targetMs);
+    return "seeked";
+  }
+
+  getControlsState() {
+    return { paused: this.isPaused(), loopMode: this.loopMode };
+  }
+
+  /**
+   * Makes a message the one whose buttons control this player, taking the
+   * buttons off the previous one so only the latest set is live.
+   */
+  setControlsMessage(message: Message) {
+    if (this.controlsMessage?.id !== message.id) this.clearControls();
+    this.controlsMessage = message;
+  }
+
+  isControlsMessage(messageId: string) {
+    return this.controlsMessage?.id === messageId;
+  }
+
+  /** Redraws the buttons after a slash command changed what they show (pause, loop) */
+  refreshControls() {
+    this.controlsMessage
+      ?.edit({ components: createPlayerControls(this.getControlsState()) })
+      .catch((error) => console.error("Failed to update the player controls:", error));
+  }
+
+  /** Takes the buttons off once there's nothing for them to control */
+  clearControls() {
+    this.controlsMessage?.edit({ components: [] }).catch(() => {});
+    this.controlsMessage = undefined;
+  }
+
   private async nextTrack(options: {
     forceSkip?: boolean;
     sendEmbed?: boolean;
@@ -455,6 +554,11 @@ class PlayerManager {
       // Failed tracks are cleared before getting here, so they don't loop
       if (this.loopMode === "queue" && previousTrack) this.queue.push(previousTrack);
       this.currentTrack = this.queue.shift();
+    }
+    // Remembered for ⏮ back. Failed tracks are cleared before getting here, so they aren't.
+    if (previousTrack && previousTrack !== this.currentTrack) {
+      this.history.push(previousTrack);
+      if (this.history.length > HISTORY_LIMIT) this.history.shift();
     }
     if (!this.currentTrack) {
       this.stopWithoutAdvancing();
@@ -494,7 +598,18 @@ class PlayerManager {
    */
   private announceNowPlaying(track: TrackExt) {
     this.getAnnouncementChannel(track)
-      ?.send({ embeds: [createNowPlayingEmbed(track.track)] })
+      ?.send({
+        embeds: [createNowPlayingEmbed(track.track)],
+        components: createPlayerControls(this.getControlsState()),
+      })
+      .then((message) => {
+        // Already skipped past before the message went out
+        if (this.currentTrack !== track || this.destroyed) {
+          message.edit({ components: [] }).catch(() => {});
+          return;
+        }
+        this.setControlsMessage(message);
+      })
       .catch((error) => console.error("Failed to announce now playing:", error));
   }
 

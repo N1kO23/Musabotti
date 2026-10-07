@@ -15,13 +15,15 @@ import {
   Events,
   GatewayIntentBits,
   Guild,
+  MessageFlags,
   REST,
   Routes,
 } from "discord.js";
 import { getCommands } from "./commands";
 import { ICommand } from "./interfaces";
-import { createMessageEmbed, verifyConditions } from "./util";
+import { PLAYER_CONTROL_PREFIX, createMessageEmbed, verifyConditions } from "./util";
 import { Context } from "./classes/context";
+import { handlePlayerControl } from "./buttons/playerControls";
 import { findPlayer } from "./services/player";
 import { clearDownloads } from "./services/trackDownload";
 import { startYtDlpAutoUpdate } from "./services/ytSource";
@@ -87,6 +89,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await commands.get(interaction.commandName)?.autocomplete?.(interaction);
     } catch (error) {
       console.error(`Autocomplete failed for /${interaction.commandName}:`, error);
+    }
+    return;
+  }
+  // Other buttons (e.g. /queue's pages) are handled by their own collectors
+  if (interaction.isButton() && interaction.customId.startsWith(PLAYER_CONTROL_PREFIX)) {
+    try {
+      await handlePlayerControl(interaction);
+    } catch (error: any) {
+      console.error("Player control failed:", error);
+      const reply = {
+        embeds: [createMessageEmbed(error?.message ?? "Something went wrong")],
+        flags: MessageFlags.Ephemeral as const,
+      };
+      await (interaction.replied || interaction.deferred
+        ? interaction.followUp(reply)
+        : interaction.reply(reply)
+      ).catch((replyError) => console.error("Failed to report error:", replyError));
     }
     return;
   }

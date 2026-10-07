@@ -14,7 +14,11 @@ import { ResolveResult, TrackInfo } from "./trackTypes";
  * mature and battle-tested against YouTube's anti-bot measures, and succeeds
  * on the exact videos that approach couldn't.
  */
-const YTDLP_BIN = process.env.YTDLP_PATH ?? "yt-dlp";
+// Read on use rather than at import, which happens before .env is loaded.
+// || rather than ?? so the empty YTDLP_PATH= from .env.example falls back too.
+const ytDlpBin = () => process.env.YTDLP_PATH || "yt-dlp";
+
+const RETRY_DELAY_MS = 1000;
 
 const URL_RE = /^https?:\/\//i;
 const PLAYLIST_ONLY_RE = /[?&]list=([^&]+)/;
@@ -48,7 +52,7 @@ function exitError(code: number | null, stderr: string) {
 
 function runYtDlp(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(YTDLP_BIN, [...BASE_ARGS, ...args], {
+    const child = spawn(ytDlpBin(), [...BASE_ARGS, ...args], {
       timeout: RESOLVE_PROCESS_TIMEOUT_MS,
     });
     let stdout = "";
@@ -257,14 +261,16 @@ export async function search(query: string, limit: number): Promise<TrackInfo[]>
  * YouTube's stricter validation for some videos, so it needs to be the one
  * doing the real download too, not just handing back a url.
  *
- * Retries once without cookies if the cookie-attached attempt fails before
- * producing any data - see runYtDlpResilient's doc comment for why.
+ * A run that fails before producing any data is retried: without cookies if
+ * they were attached (see runYtDlpResilient's doc comment for why), and once
+ * more as-is, since YouTube occasionally refuses a download (HTTP 403) that
+ * a fresh run then gets through.
  */
 export function getPlayableStream(url: string, signal: AbortSignal): Readable {
   const output = new PassThrough();
   const cookies = cookieArgs();
 
-  const attempt = (useCookies: boolean) => {
+  const attempt = (useCookies: boolean, retriesLeft: number) => {
     const args = [
       ...BASE_ARGS,
       "-f",
@@ -278,16 +284,16 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
       url,
     ];
 
-    const child = spawn(YTDLP_BIN, args, { signal });
+    const child = spawn(ytDlpBin(), args, { signal });
     let stderr = "";
     let gotData = false;
     // 'error' and 'close' can both fire for the same failed run
     let settled = false;
 
     child.stdout.once("data", () => (gotData = true));
-    // Piped rather than written by hand so yt-dlp gets paused while ffmpeg is
-    // behind: it downloads far faster than real time, which would otherwise
-    // buffer the whole track in memory. Not ended here since a retry may follow.
+    // Piped rather than written by hand so yt-dlp gets paused whenever the
+    // reader falls behind, instead of buffering the rest of the track in
+    // memory. Not ended here since a retry may follow.
     child.stdout.pipe(output, { end: false });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
@@ -302,9 +308,12 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
         output.destroy();
       } else if (!error) {
         output.end();
-      } else if (useCookies && cookies.length > 0 && !gotData) {
+      } else if (!gotData && useCookies) {
         console.error("yt-dlp failed with cookies attached before any data arrived, retrying without them:", error);
-        attempt(false);
+        attempt(false, retriesLeft);
+      } else if (!gotData && retriesLeft > 0) {
+        console.error("yt-dlp failed before any data arrived, retrying:", error);
+        setTimeout(() => attempt(false, retriesLeft - 1), RETRY_DELAY_MS);
       } else {
         output.destroy(error);
       }
@@ -316,6 +325,42 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
     child.on("close", (code) => settle(code === 0 ? undefined : exitError(code, stderr)));
   };
 
-  attempt(cookies.length > 0);
+  attempt(cookies.length > 0, 1);
   return output;
+}
+
+// How often a long-running bot checks for a newer yt-dlp
+const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Generous, since an update downloads the whole binary
+const UPDATE_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Keeps yt-dlp current: YouTube changes break older releases within weeks,
+ * and the bot can run far longer than that. Checks at startup and daily
+ * after. yt-dlp swaps its binary in with a single rename, so runs already in
+ * progress are unaffected. A copy installed through a package manager (pip,
+ * distro packages) refuses to update itself - that just gets logged. Set
+ * YTDLP_AUTO_UPDATE=false to turn this off.
+ */
+export function startYtDlpAutoUpdate() {
+  if (process.env.YTDLP_AUTO_UPDATE === "false") return;
+
+  const update = () => {
+    const child = spawn(ytDlpBin(), ["--update"], { timeout: UPDATE_TIMEOUT_MS });
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    child.on("error", (error) => console.error("Failed to run the yt-dlp update check:", error));
+    child.on("close", (code) => {
+      const summary = output.trim().split("\n").slice(-2).join(" | ");
+      if (code === 0) {
+        console.log(`[yt-dlp] update check: ${summary}`);
+      } else {
+        console.error(`yt-dlp update check failed (${code === null ? "killed" : `code ${code}`}): ${summary}`);
+      }
+    });
+  };
+
+  update();
+  setInterval(update, UPDATE_INTERVAL_MS).unref();
 }

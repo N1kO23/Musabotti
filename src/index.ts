@@ -19,6 +19,7 @@ import { getCommands } from "./commands";
 import { ICommand } from "./interfaces";
 import { verifyConditions } from "./util";
 import { Context } from "./classes/context";
+import { findPlayer } from "./services/player";
 
 import * as dotenv from "dotenv";
 dotenv.config();
@@ -71,7 +72,19 @@ client.on(Events.GuildDelete, async (guild) => {
   }
 });
 
+client.on(Events.VoiceStateUpdate, (_oldState, newState) => {
+  findPlayer(newState.guild.id)?.checkListeners();
+});
+
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isAutocomplete()) {
+    try {
+      await commands.get(interaction.commandName)?.autocomplete?.(interaction);
+    } catch (error) {
+      console.error(`Autocomplete failed for /${interaction.commandName}:`, error);
+    }
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.guildId) {
     await interaction.reply("Commands can only be used in a server!");

@@ -8,12 +8,14 @@ const command: ICommand = {
     .setDescription("Sends an embed that displays the available commands"),
   conditions: [],
   execute: async (context) => {
-    const commands = getCommandNamesAndDescriptions();
-    const embed = new EmbedBuilder().setColor("DarkOrange").setTitle("Help");
-
-    commands.forEach((command) => {
-      embed.addFields({ name: `/${command.name}`, value: command.description });
-    });
+    // One line per command rather than a field each: embeds cap out at 25 fields
+    const lines = getCommandNamesAndDescriptions().map(
+      (command) => `**/${command.name}** - ${command.description}`,
+    );
+    const embed = new EmbedBuilder()
+      .setColor("DarkOrange")
+      .setTitle("Help")
+      .setDescription(lines.join("\n"));
 
     await context.reply({ embeds: [embed] });
   },

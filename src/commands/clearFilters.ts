@@ -4,7 +4,7 @@ import { getPlayer } from "../services/player";
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
-    .setName("clear")
+    .setName("resetfilters")
     .setDescription("Resets all the filters to default values"),
   conditions: [CONDITIONS.SameVoice],
   execute: async (context) => {

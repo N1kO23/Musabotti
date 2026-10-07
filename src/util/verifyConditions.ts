@@ -23,7 +23,7 @@ export const verifyConditions = (
 
       case CONDITIONS.PlayerExists: {
         if (!hasPlayer(context.guildId)) {
-          throw new Error("No player was found for this server!");
+          throw new Error("I am not connected to any voice channels!");
         }
         break;
       }

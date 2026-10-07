@@ -44,6 +44,11 @@ export async function resolve(query: string): Promise<ResolveResult> {
   return ytSource.resolve(query);
 }
 
+/** Suggestions while typing a /play search, which runs against YouTube like resolve() does */
+export async function searchSuggestions(query: string, limit: number): Promise<TrackInfo[]> {
+  return ytSource.search(query, limit);
+}
+
 /** For a Discord attachment uploaded directly to the /play command. */
 export async function resolveAttachment(url: string, filename: string): Promise<ResolveResult> {
   return fileSource.resolveNamed(url, filename);

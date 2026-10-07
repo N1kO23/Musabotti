@@ -1,19 +1,35 @@
 import { EmbedBuilder, SlashCommandBuilder } from "discord.js";
 import { CONDITIONS, ICommand } from "../interfaces";
 import { getPlayer } from "../services/player";
+import { TIMESCALE_MAX, TIMESCALE_MIN } from "../util/ffmpegFilters";
 
 const command: ICommand = {
   data: new SlashCommandBuilder()
     .setName("timescale")
     .setDescription("Sets the time scale of the player")
     .addNumberOption((option) =>
-      option.setName("speed").setDescription("The song speed").setRequired(false),
+      option
+        .setName("speed")
+        .setDescription("The song speed")
+        .setMinValue(TIMESCALE_MIN)
+        .setMaxValue(TIMESCALE_MAX)
+        .setRequired(false),
     )
     .addNumberOption((option) =>
-      option.setName("pitch").setDescription("The song pitch").setRequired(false),
+      option
+        .setName("pitch")
+        .setDescription("The song pitch")
+        .setMinValue(TIMESCALE_MIN)
+        .setMaxValue(TIMESCALE_MAX)
+        .setRequired(false),
     )
     .addNumberOption((option) =>
-      option.setName("rate").setDescription("The song rate").setRequired(false),
+      option
+        .setName("rate")
+        .setDescription("The song rate")
+        .setMinValue(TIMESCALE_MIN)
+        .setMaxValue(TIMESCALE_MAX)
+        .setRequired(false),
     ),
   conditions: [CONDITIONS.SameVoice],
   execute: async (context, interaction) => {

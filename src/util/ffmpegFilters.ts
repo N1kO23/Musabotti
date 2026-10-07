@@ -78,8 +78,22 @@ function buildAtempoChain(tempo: number): string[] {
   return stages;
 }
 
+// Each timescale value is clamped to this range. Zero or negative values
+// would make buildAtempoChain loop until it runs out of memory.
+export const TIMESCALE_MIN = 0.25;
+export const TIMESCALE_MAX = 4;
+
+const clampTimescale = (value: number) =>
+  Number.isFinite(value) ? Math.min(TIMESCALE_MAX, Math.max(TIMESCALE_MIN, value)) : 1;
+
+/** How much of the track plays per second of real time */
+export const playbackTempo = (timescale: TimescaleSettings) =>
+  clampTimescale(timescale.speed) * clampTimescale(timescale.rate);
+
 function buildTimescale(timescale: TimescaleSettings): string[] {
-  const { speed, pitch, rate } = timescale;
+  const speed = clampTimescale(timescale.speed);
+  const pitch = clampTimescale(timescale.pitch);
+  const rate = clampTimescale(timescale.rate);
   if (speed === 1 && pitch === 1 && rate === 1) return [];
 
   const totalPitch = pitch * rate;

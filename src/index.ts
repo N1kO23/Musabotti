@@ -23,6 +23,12 @@ import { Context } from "./classes/context";
 import * as dotenv from "dotenv";
 dotenv.config();
 
+// Node exits on an unhandled rejection by default, which would take down
+// playback in every guild over one failed background task
+process.on("unhandledRejection", (error) => {
+  console.error("Unhandled promise rejection:", error);
+});
+
 const commands = new Collection<string, ICommand>();
 
 getCommands().forEach((command) => {

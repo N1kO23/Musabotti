@@ -13,8 +13,9 @@ const command: ICommand = {
       await context.reply("I am not connected to any voice channels!");
       return;
     }
-    await player.skipSong();
+    // Reply first: resolving the next track can outlast Discord's 3s reply window
     await context.reply("Skipped!");
+    await player.skipSong();
   },
 };
 

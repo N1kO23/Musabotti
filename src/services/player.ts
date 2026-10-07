@@ -168,7 +168,14 @@ class PlayerManager {
     // asynchronously after play(). Re-applying it here keeps a restart
     // (seek/filter change/skip) or a /pause during that window from audibly
     // resuming playback. Emitted synchronously, so no audio slips through.
-    this.audioPlayer.on(AudioPlayerStatus.Playing, () => {
+    this.audioPlayer.on(AudioPlayerStatus.Playing, (oldState) => {
+      // A new pipeline's position clock starts once its audio actually does:
+      // yt-dlp takes a few seconds to deliver the first bytes, which would
+      // otherwise count as played (and get skipped on the next filter change)
+      if (oldState.status === AudioPlayerStatus.Buffering) {
+        this.segmentStartedAt = Date.now();
+        if (this.pausedAt) this.pausedAt = this.segmentStartedAt;
+      }
       if (this.pausedAt) this.audioPlayer.pause();
     });
     this.audioPlayer.on("error", (error) => {
@@ -605,6 +612,8 @@ class PlayerManager {
   /** Position within the track itself, which only matches wall-clock time at 1x speed */
   getPositionMs() {
     if (!this.segmentStartedAt) return 0;
+    // Still waiting on a new pipeline's first audio (see the Playing listener)
+    if (this.audioPlayer.state.status === AudioPlayerStatus.Buffering) return this.positionOffsetMs;
     const now = this.pausedAt ?? Date.now();
     return this.positionOffsetMs + (now - this.segmentStartedAt) * this.segmentTempo;
   }

@@ -5,6 +5,9 @@ import { setDefaultResultOrder } from "node:dns";
 // reach Ready inside Docker. This must run before anything else connects.
 setDefaultResultOrder("ipv4first");
 
+// Before the other imports, since some of them read settings as they load
+import "dotenv/config";
+
 import {
   ActivityType,
   Client,
@@ -20,15 +23,17 @@ import { ICommand } from "./interfaces";
 import { createMessageEmbed, verifyConditions } from "./util";
 import { Context } from "./classes/context";
 import { findPlayer } from "./services/player";
-
-import * as dotenv from "dotenv";
-dotenv.config();
+import { clearDownloads } from "./services/trackDownload";
+import { startYtDlpAutoUpdate } from "./services/ytSource";
 
 // Node exits on an unhandled rejection by default, which would take down
 // playback in every guild over one failed background task
 process.on("unhandledRejection", (error) => {
   console.error("Unhandled promise rejection:", error);
 });
+
+clearDownloads();
+startYtDlpAutoUpdate();
 
 const commands = new Collection<string, ICommand>();
 

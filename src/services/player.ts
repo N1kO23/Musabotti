@@ -12,7 +12,7 @@ import {
 } from "@discordjs/voice";
 import { Client, Collection, TextChannel } from "discord.js";
 import { FFmpeg } from "prism-media";
-import { Readable } from "stream";
+import { PassThrough, Readable } from "stream";
 import { Context } from "../classes/context";
 import { createMessageEmbed, createNowPlayingEmbed, formatTitle } from "../util";
 import { shuffleArray } from "../util";
@@ -23,12 +23,19 @@ import {
   defaultFilterState,
   playbackTempo,
 } from "../util/ffmpegFilters";
+import { TrackDownload } from "./trackDownload";
 import { TrackInfo, getPlayableStream } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
 
 export type LoopMode = "off" | "track" | "queue";
+
+/** A pipeline's audio input, and how to stop it once the pipeline is replaced */
+interface PipelineInput {
+  stream: Readable;
+  close: () => void;
+}
 
 export class TrackExt {
   track: TrackInfo;
@@ -140,13 +147,17 @@ class PlayerManager {
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
   private aloneTimeoutId?: NodeJS.Timeout;
+  // || rather than ?? so the empty TIMEOUT_DURATION= from .env.example falls
+  // back too: parseInt("") is NaN, which setTimeout treats as 1ms
   private timeoutDuration = Number.parseInt(
-    process.env.TIMEOUT_DURATION ?? "30000",
+    process.env.TIMEOUT_DURATION || "30000",
     10,
   );
   private filters: FilterState = defaultFilterState();
   private ffmpeg?: FFmpeg;
-  private fetchAbort?: AbortController;
+  // The current pipeline's audio input, and the saved download it reads from
+  private input?: PipelineInput;
+  private download?: { track: TrackExt; download: TrackDownload };
   private stopping = false;
   private destroyed = false;
   private playGeneration = 0;
@@ -207,10 +218,12 @@ class PlayerManager {
    * flag only has to cover the call itself.
    */
   private stopWithoutAdvancing() {
-    // Also cancels a track still resolving its url, so it doesn't start anyway
+    // Makes a late error from the stopped pipeline get ignored
     this.playGeneration++;
-    this.fetchAbort?.abort();
+    this.input?.close();
+    this.input = undefined;
     this.ffmpeg?.destroy();
+    this.discardDownload();
     this.stopping = true;
     this.audioPlayer.stop(true);
     this.stopping = false;
@@ -317,8 +330,9 @@ class PlayerManager {
     this.playGeneration++;
     this.stopMonitoring();
     clearTimeout(this.aloneTimeoutId);
-    this.fetchAbort?.abort();
+    this.input?.close();
     this.ffmpeg?.destroy();
+    this.discardDownload();
     this.audioPlayer.stop(true);
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
@@ -499,45 +513,22 @@ class PlayerManager {
    * state. Used for the initial play, skip, seek and whenever a filter/volume
    * change requires restarting the audio pipeline.
    *
-   * Each source decides for itself how to actually fetch the audio (see
-   * trackSource.getPlayableStream) - this just pipes whatever stream it gets
-   * into ffmpeg's stdin. The tradeoff is that seeking becomes a decode-and-
-   * discard instead of an efficient input-side seek, since a piped stream
-   * isn't seekable - acceptable for a music bot's typical seek distances.
+   * The audio comes from openInput() and is piped into ffmpeg's stdin. The
+   * tradeoff is that seeking becomes a decode-and-discard instead of an
+   * efficient input-side seek, since a piped stream isn't seekable - fast
+   * here anyway, since a restart reads the track back from disk.
    */
   private async playCurrentTrack(startMs?: number) {
     if (!this.currentTrack) return;
     const trackAtStart = this.currentTrack;
     const generation = ++this.playGeneration;
 
-    // A newer skip/seek/filter change, a stop or a disconnect may happen while
-    // the stream is being set up (e.g. resolving a SoundCloud url). Starting
-    // this one anyway would play over it, and its failure no longer matters
-    // either. The old pipeline keeps playing until then.
-    const fetchAbort = new AbortController();
-    let inputStream: Readable;
-    try {
-      inputStream = await getPlayableStream(trackAtStart.track, fetchAbort.signal);
-    } catch (error) {
-      fetchAbort.abort();
-      if (generation !== this.playGeneration) return;
-      throw error;
-    }
-    if (generation !== this.playGeneration) {
-      // Aborting makes some sources error the stream, which would crash the
-      // process if nothing were listening
-      inputStream.on("error", () => {});
-      fetchAbort.abort();
-      return;
-    }
-
-    // Taken after setting up the stream so the old pipeline's playback during
-    // that time isn't replayed
     const positionMs = startMs ?? this.getPositionMs();
     const filterArgs = buildFilterChain(this.filters);
 
-    this.fetchAbort?.abort();
-    this.fetchAbort = fetchAbort;
+    this.input?.close();
+    const input = this.openInput(trackAtStart);
+    this.input = input;
 
     const args = [
       "-loglevel",
@@ -573,7 +564,7 @@ class PlayerManager {
       this.currentTrack = undefined;
       // A failed fetch leaves ffmpeg waiting on stdin forever, so the player
       // would never reach Idle on its own. Stopping it moves on to the next track.
-      fetchAbort.abort();
+      input.close();
       ffmpeg.destroy();
       this.audioPlayer.stop(true);
     };
@@ -585,11 +576,11 @@ class PlayerManager {
     ffmpeg.process.stderr?.on("data", (chunk) =>
       console.log(`[guild ${this.guildId}] ffmpeg: ${chunk.toString().trim()}`),
     );
-    inputStream.on("error", (error: Error) => {
+    input.stream.on("error", (error: Error) => {
       console.error("audio fetch stream error:", error);
       onPlaybackFailure(error);
     });
-    inputStream.pipe(ffmpeg);
+    input.stream.pipe(ffmpeg);
 
     const resource = createAudioResource(ffmpeg, {
       inputType: StreamType.OggOpus,
@@ -607,6 +598,47 @@ class PlayerManager {
 
     // If paused, the Playing listener pauses this again as soon as it starts
     this.audioPlayer.play(resource);
+  }
+
+  /**
+   * Opens a track's audio for a new pipeline. A track's first play saves it
+   * to disk (see TrackDownload) and restarts of that same track - seeks,
+   * filter changes, track loops - read it back from there. Live streams
+   * never finish downloading, so they're fetched afresh each time instead.
+   */
+  private openInput(track: TrackExt): PipelineInput {
+    if (track.track.isLive) {
+      const abort = new AbortController();
+      const stream = new PassThrough();
+      getPlayableStream(track.track, abort.signal)
+        .then((source) => {
+          source.on("error", (error) => stream.destroy(error));
+          source.pipe(stream);
+        })
+        .catch((error) => stream.destroy(error));
+      return {
+        stream,
+        close: () => {
+          abort.abort();
+          stream.destroy();
+        },
+      };
+    }
+
+    if (this.download?.track !== track || this.download.download.failed) {
+      this.discardDownload();
+      this.download = {
+        track,
+        download: new TrackDownload((signal) => getPlayableStream(track.track, signal)),
+      };
+    }
+    const stream = this.download.download.createReader();
+    return { stream, close: () => stream.destroy() };
+  }
+
+  private discardDownload() {
+    this.download?.download.discard();
+    this.download = undefined;
   }
 
   /** Position within the track itself, which only matches wall-clock time at 1x speed */

@@ -1,9 +1,12 @@
 import {
   ActionRowBuilder,
   ButtonBuilder,
+  ButtonInteraction,
   ButtonStyle,
+  ChatInputCommandInteraction,
   ComponentType,
   EmbedBuilder,
+  MessageFlags,
   SlashCommandBuilder,
   escapeMarkdown,
 } from "discord.js";
@@ -92,33 +95,47 @@ const command: ICommand = {
     .setDescription("Shows the current song and what's coming up"),
   conditions: [CONDITIONS.PlayerExists],
   execute: async (context, interaction) => {
-    const player = getPlayerInstance(context.guildId);
-    let page = 0;
-    // The queue can change between button presses, so re-clamp on every render
-    const render = () => {
-      page = Math.max(0, Math.min(page, pageCount(player) - 1));
-      return renderPage(player, page);
-    };
-
-    const response = await interaction.reply(render());
-    if (pageCount(player) === 1) return;
-
-    const collector = response.createMessageComponentCollector({
-      componentType: ComponentType.Button,
-      time: PAGE_BUTTONS_TIMEOUT_MS,
-    });
-    collector.on("collect", async (button) => {
-      page += button.customId === "queue-next" ? 1 : -1;
-      await button
-        .update(render())
-        .catch((error) => console.error("Failed to change queue page:", error));
-    });
-    collector.on("end", () => {
-      interaction
-        .editReply({ components: [] })
-        .catch((error) => console.error("Failed to remove queue buttons:", error));
-    });
+    await showQueue(interaction, getPlayerInstance(context.guildId));
   },
 };
+
+/**
+ * Replies with the queue and its page buttons. Also used by the 📜 player
+ * control, which shows it privately to whoever pressed it.
+ */
+export async function showQueue(
+  interaction: ChatInputCommandInteraction | ButtonInteraction,
+  player: Player,
+  options: { private?: boolean } = {},
+) {
+  let page = 0;
+  // The queue can change between button presses, so re-clamp on every render
+  const render = () => {
+    page = Math.max(0, Math.min(page, pageCount(player) - 1));
+    return renderPage(player, page);
+  };
+
+  const response = await interaction.reply({
+    ...render(),
+    flags: options.private ? MessageFlags.Ephemeral : undefined,
+  });
+  if (pageCount(player) === 1) return;
+
+  const collector = response.createMessageComponentCollector({
+    componentType: ComponentType.Button,
+    time: PAGE_BUTTONS_TIMEOUT_MS,
+  });
+  collector.on("collect", async (button) => {
+    page += button.customId === "queue-next" ? 1 : -1;
+    await button
+      .update(render())
+      .catch((error) => console.error("Failed to change queue page:", error));
+  });
+  collector.on("end", () => {
+    interaction
+      .editReply({ components: [] })
+      .catch((error) => console.error("Failed to remove queue buttons:", error));
+  });
+}
 
 export default command;

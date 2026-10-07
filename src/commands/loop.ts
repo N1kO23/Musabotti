@@ -3,12 +3,6 @@ import { CONDITIONS, ICommand } from "../interfaces";
 import { LoopMode, getPlayerInstance } from "../services/player";
 import { LOOP_MODE_LABELS } from "../util";
 
-const NEXT_MODE: Record<LoopMode, LoopMode> = {
-  off: "track",
-  track: "queue",
-  queue: "off",
-};
-
 const command: ICommand = {
   data: new SlashCommandBuilder()
     .setName("loop")
@@ -27,11 +21,11 @@ const command: ICommand = {
   conditions: [CONDITIONS.SameVoice, CONDITIONS.PlayerExists],
   execute: async (context, interaction) => {
     const player = getPlayerInstance(context.guildId);
-    const mode =
-      (interaction.options.getString("mode") as LoopMode | null) ??
-      NEXT_MODE[player.getLoopMode()];
-    player.setLoopMode(mode);
-    await context.reply(LOOP_MODE_LABELS[mode]);
+    const chosen = interaction.options.getString("mode") as LoopMode | null;
+    if (chosen) player.setLoopMode(chosen);
+    else player.cycleLoopMode();
+    player.refreshControls();
+    await context.reply(LOOP_MODE_LABELS[player.getLoopMode()]);
   },
 };
 

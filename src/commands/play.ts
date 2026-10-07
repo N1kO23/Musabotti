@@ -11,6 +11,7 @@ import {
 } from "../util";
 
 const AUDIO_FILE_EXT_RE = /\.(mp3|wav|ogg|oga|m4a|flac|opus|aac|webm|wma)$/i;
+const RESOLVE_TIMEOUT_MS = 20_000;
 
 const SUGGESTION_LIMIT = 5;
 const SUGGESTION_MIN_QUERY_LENGTH = 3;
@@ -94,7 +95,7 @@ const command: ICommand = {
         }
         result = await resolveAttachment(file.url, file.name);
       } else {
-        result = await resolve(query!);
+        result = await withTimeout(resolve(query!), RESOLVE_TIMEOUT_MS);
       }
     } catch (error: any) {
       console.error(`Failed to resolve "${query ?? file?.url}":`, error);

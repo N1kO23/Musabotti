@@ -4,3 +4,4 @@ lavacord/
 .env
 database.db
 youtube-cookies.json
+youtube-cookies.txt

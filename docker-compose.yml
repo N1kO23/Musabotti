@@ -10,9 +10,9 @@ services:
       - SOUNDCLOUD_CLIENT_ID
       - SOUNDCLOUD_OAUTH_TOKEN
       # Uncomment together with the volume below to enable playback of videos
-      # that need a signed-in account (see .env.example) - the cookie array is
+      # that need a signed-in account (see .env.example) - the cookie data is
       # too large to pass as a plain env var.
-      - YOUTUBE_COOKIES_FILE=/run/secrets/youtube-cookies.json
-    volumes:
-      - ./youtube-cookies.json:/run/secrets/youtube-cookies.json:ro
+    #  - YOUTUBE_COOKIES_FILE=/run/secrets/youtube-cookies.json
+    #volumes:
+    #  - ./youtube-cookies.json:/run/secrets/youtube-cookies.json:ro
     restart: unless-stopped

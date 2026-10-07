@@ -1,3 +1,5 @@
+import { Readable } from "stream";
+import { createResumableAudioStream } from "../util/resumableFetch";
 import { ResolveResult } from "./trackTypes";
 
 function extractFilename(url: string): string {
@@ -34,6 +36,6 @@ export async function resolveNamed(url: string, filename: string): Promise<Resol
   };
 }
 
-export async function getPlayableUrl(url: string): Promise<string> {
-  return url;
+export async function getPlayableStream(url: string, signal: AbortSignal): Promise<Readable> {
+  return createResumableAudioStream(url, signal);
 }

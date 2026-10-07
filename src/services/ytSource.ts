@@ -32,9 +32,25 @@ interface YtDlpEntry {
   thumbnails?: { url: string }[];
 }
 
+// Passed to every yt-dlp run. YouTube extraction without a JS runtime is
+// deprecated in yt-dlp (formats go missing) and only deno is enabled by
+// default - Node is always available wherever the bot itself runs.
+const BASE_ARGS = ["--js-runtimes", `node:${process.execPath}`];
+
+// Kills a hung metadata lookup; /play stops waiting on it well before this
+const RESOLVE_PROCESS_TIMEOUT_MS = 30_000;
+
+function exitError(code: number | null, stderr: string) {
+  const lastLines = stderr.trim().split("\n").slice(-3).join(" | ");
+  const reason = code === null ? "was killed" : `exited with code ${code}`;
+  return new Error(`yt-dlp ${reason}${lastLines ? `: ${lastLines}` : ""}`);
+}
+
 function runYtDlp(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(YTDLP_BIN, args);
+    const child = spawn(YTDLP_BIN, [...BASE_ARGS, ...args], {
+      timeout: RESOLVE_PROCESS_TIMEOUT_MS,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -44,8 +60,7 @@ function runYtDlp(args: string[]): Promise<string> {
       if (code === 0) {
         resolve(stdout);
       } else {
-        const lastLines = stderr.trim().split("\n").slice(-3).join(" | ");
-        reject(new Error(`yt-dlp exited with code ${code}${lastLines ? `: ${lastLines}` : ""}`));
+        reject(exitError(code, stderr));
       }
     });
   });
@@ -251,6 +266,7 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
 
   const attempt = (useCookies: boolean) => {
     const args = [
+      ...BASE_ARGS,
       "-f",
       "bestaudio",
       "--no-playlist",
@@ -265,18 +281,28 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
     const child = spawn(YTDLP_BIN, args, { signal });
     let stderr = "";
     let gotData = false;
+    // 'error' and 'close' can both fire for the same failed run
+    let settled = false;
 
-    child.stdout.on("data", (chunk) => {
-      gotData = true;
-      output.write(chunk);
-    });
+    child.stdout.once("data", () => (gotData = true));
+    // Piped rather than written by hand so yt-dlp gets paused while ffmpeg is
+    // behind: it downloads far faster than real time, which would otherwise
+    // buffer the whole track in memory. Not ended here since a retry may follow.
+    child.stdout.pipe(output, { end: false });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
       console.log(`[yt-dlp] ${chunk.toString().trim()}`);
     });
 
-    const onFailure = (error: Error) => {
-      if (useCookies && cookies.length > 0 && !gotData) {
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (signal.aborted) {
+        // The player has moved on (skip/seek/stop) - nobody is listening anymore
+        output.destroy();
+      } else if (!error) {
+        output.end();
+      } else if (useCookies && cookies.length > 0 && !gotData) {
         console.error("yt-dlp failed with cookies attached before any data arrived, retrying without them:", error);
         attempt(false);
       } else {
@@ -284,15 +310,10 @@ export function getPlayableStream(url: string, signal: AbortSignal): Readable {
       }
     };
 
-    child.on("error", onFailure);
-    child.on("close", (code) => {
-      if (code === 0 || code === null) {
-        output.end();
-      } else {
-        const lastLines = stderr.trim().split("\n").slice(-3).join(" | ");
-        onFailure(new Error(`yt-dlp exited with code ${code}${lastLines ? `: ${lastLines}` : ""}`));
-      }
-    });
+    child.on("error", settle);
+    // A null code means it was killed by something other than our abort (e.g.
+    // the OOM killer) - a failure, not the end of the track
+    child.on("close", (code) => settle(code === 0 ? undefined : exitError(code, stderr)));
   };
 
   attempt(cookies.length > 0);

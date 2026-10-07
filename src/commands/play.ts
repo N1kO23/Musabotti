@@ -57,7 +57,7 @@ const command: ICommand = {
     .addStringOption((option) =>
       option
         .setName("song")
-        .setDescription("Song name, YouTube/SoundCloud url, audio file url, or 'scsearch:query'")
+        .setDescription("Song name, YouTube/SoundCloud/Spotify url, audio file url, or 'scsearch:query'")
         .setAutocomplete(true)
         .setRequired(false),
     )
@@ -107,7 +107,9 @@ const command: ICommand = {
       for (const track of result.tracks) {
         await queueTrack(context.client, track, context);
       }
-      await context.reply({ embeds: [createPlaylistEmbed(result.tracks)] });
+      const embed = createPlaylistEmbed(result.tracks);
+      if (result.notice) embed.setFooter({ text: result.notice });
+      await context.reply({ embeds: [embed] });
     } else {
       const [track] = result.tracks;
       await context.reply({ embeds: [createEmbed(track)] });
@@ -116,11 +118,10 @@ const command: ICommand = {
   },
   autocomplete: async (interaction) => {
     const query = interaction.options.getFocused().trim();
-    // Links and SoundCloud searches go through as typed
+    // Links, Spotify URIs and SoundCloud searches go through as typed
     if (
       query.length < SUGGESTION_MIN_QUERY_LENGTH ||
-      /^https?:\/\//i.test(query) ||
-      /^scsearch:/i.test(query)
+      /^(https?:\/\/|spotify:|scsearch:)/i.test(query)
     ) {
       await interaction.respond([]);
       return;

@@ -24,7 +24,7 @@ import {
   playbackTempo,
 } from "../util/ffmpegFilters";
 import { TrackDownload } from "./trackDownload";
-import { TrackInfo, getPlayableStream } from "./trackSource";
+import { TrackInfo, getPlayableStream, prefetch } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
@@ -366,6 +366,8 @@ class PlayerManager {
   async queueTrack(track: TrackExt) {
     this.queue.push(track);
     if (!this.currentTrack) await this.nextTrack({ sendEmbed: true });
+    // Queued straight into the up-next spot while something plays
+    else if (this.queue.length === 1) prefetch(track.track);
   }
 
   getLoopMode() {
@@ -467,6 +469,8 @@ class PlayerManager {
     if (options.sendEmbed && this.currentTrack !== previousTrack) {
       this.announceNowPlaying(this.currentTrack);
     }
+    // Gets the next track ready while this one plays (see trackSource.prefetch)
+    if (this.queue[0]) prefetch(this.queue[0].track);
 
     const track = this.currentTrack;
     try {

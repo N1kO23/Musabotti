@@ -189,6 +189,15 @@ function cookieArgs(): string[] {
   return filePath ? ["--cookies", filePath] : [];
 }
 
+/** yt-dlp's -j output: one JSON object per line */
+function parseEntries(output: string): YtDlpEntry[] {
+  return output
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 function toTrackInfo(entry: YtDlpEntry): TrackInfo {
   return {
     source: "youtube",
@@ -220,13 +229,7 @@ export async function resolve(query: string): Promise<ResolveResult> {
     target,
   ];
 
-  const output = await runYtDlpResilient(args);
-
-  const entries: YtDlpEntry[] = output
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  const entries = parseEntries(await runYtDlpResilient(args));
 
   if (entries.length === 0) {
     throw new Error(isUrl ? "That url is not a supported YouTube link" : "No results found for that search");
@@ -252,6 +255,93 @@ export async function search(query: string, limit: number): Promise<TrackInfo[]>
     thumbnail: video.thumbnail,
     isLive: video.duration.seconds === 0,
   }));
+}
+
+// Version labels Spotify appends (" - 2004 Remaster", " - Mono") that YouTube
+// titles don't share. Live recordings and remixes keep theirs, since those
+// are different recordings to find.
+const VERSION_LABEL_RE =
+  /\s+-\s+[^-]*\b(remaster(ed)?|mono|stereo|single version|album version|radio edit)\b.*$/i;
+const FEATURING_RE = /\s*[([](feat|ft|with)\.?\s[^)\]]*[)\]]/gi;
+// How far a plain YouTube result's length may be from the song's to count as it
+const LENGTH_TOLERANCE_S = 3;
+
+/** Letters and digits only, lowercased and without accents, for comparing titles */
+const normalizeTitle = (title: string) =>
+  title
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+const titlesMatch = (a: string, b: string) => {
+  const x = normalizeTitle(a);
+  const y = normalizeTitle(b);
+  return !x || !y || x.includes(y) || y.includes(x);
+};
+
+const watchUrl = (entry: YtDlpEntry) => `https://www.youtube.com/watch?v=${entry.id}`;
+
+/**
+ * Finds the YouTube upload of a song known only by its title, artist and
+ * length (e.g. from Spotify). YouTube Music's song search comes first: it
+ * returns official recordings, and its top result was the right one for
+ * every song tried. Its results carry no length, so the title is what gets
+ * checked there. Plain YouTube search is the fallback, where the length
+ * decides between official uploads, lyric videos and covers.
+ */
+export async function findSong(
+  title: string,
+  artist: string,
+  durationMs: number,
+): Promise<string | undefined> {
+  const cleanTitle = title.replace(VERSION_LABEL_RE, "").replace(FEATURING_RE, "").trim();
+  const mainArtist = artist.split(",")[0].trim();
+
+  try {
+    const query = encodeURIComponent(`${mainArtist} ${cleanTitle}`);
+    const songs = parseEntries(
+      await runYtDlpResilient([
+        "-j",
+        "--flat-playlist",
+        "--playlist-end",
+        "5",
+        "--no-warnings",
+        `https://music.youtube.com/search?q=${query}#songs`,
+      ]),
+    );
+    const song = songs.find((entry) => titlesMatch(entry.title, cleanTitle));
+    if (song) return watchUrl(song);
+  } catch (error) {
+    console.error(`YouTube Music search failed for "${mainArtist} - ${cleanTitle}", trying YouTube:`, error);
+  }
+
+  const videos = parseEntries(
+    await runYtDlpResilient([
+      "-j",
+      "--flat-playlist",
+      "--no-warnings",
+      `ytsearch5:${mainArtist} - ${cleanTitle}`,
+    ]),
+  );
+  if (!durationMs) return videos[0] && watchUrl(videos[0]);
+
+  const target = durationMs / 1000;
+  const isTopic = (entry: YtDlpEntry) => /- Topic$/.test(entry.channel ?? "");
+  const candidates = videos
+    .filter((entry) => entry.duration)
+    .map((entry) => ({ entry, off: Math.abs(entry.duration! - target) }));
+  // Official "- Topic" audio first, then whatever is closest in length
+  const sameLength = candidates
+    .filter((c) => c.off <= LENGTH_TOLERANCE_S)
+    .sort((a, b) => Number(isTopic(b.entry)) - Number(isTopic(a.entry)) || a.off - b.off);
+  // Nothing that long: an upload with the right title is still better than none
+  const sameTitle = candidates
+    .filter((c) => titlesMatch(c.entry.title, cleanTitle))
+    .sort((a, b) => a.off - b.off);
+  const pick = sameLength[0] ?? sameTitle[0];
+  return pick && watchUrl(pick.entry);
 }
 
 /**

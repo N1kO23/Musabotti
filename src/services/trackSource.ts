@@ -1,6 +1,7 @@
 import { Readable } from "stream";
 import * as fileSource from "./fileSource";
 import * as soundcloudSource from "./soundcloudSource";
+import * as spotifySource from "./spotifySource";
 import { ResolveResult, TrackInfo } from "./trackTypes";
 import * as ytSource from "./ytSource";
 
@@ -24,9 +25,10 @@ async function looksLikeAudioFile(url: string): Promise<boolean> {
 
 /**
  * Routes a user-provided search term or url to the right source: an explicit
- * "scsearch:" query or a SoundCloud link goes to SoundCloud, a direct link to
- * an audio file plays directly, and everything else (YouTube urls and plain
- * keyword searches) goes to YouTube. Audio files are usually recognized by
+ * "scsearch:" query or a SoundCloud link goes to SoundCloud, a Spotify link
+ * to Spotify (played through YouTube - see spotifySource.ts), a direct link
+ * to an audio file plays directly, and everything else (YouTube urls and
+ * plain keyword searches) goes to YouTube. Audio files are usually recognized by
  * their url extension; urls without one (some CDNs serve audio behind a
  * hash/id path with no extension at all) fall back to checking the actual
  * Content-Type before giving up and treating it as an unsupported YouTube link.
@@ -36,6 +38,7 @@ export async function resolve(query: string): Promise<ResolveResult> {
     return soundcloudSource.resolve(query.replace(SCSEARCH_PREFIX_RE, ""));
   }
   if (SOUNDCLOUD_RE.test(query)) return soundcloudSource.resolve(query);
+  if (spotifySource.SPOTIFY_RE.test(query)) return spotifySource.resolve(query);
 
   const isUrl = URL_RE.test(query);
   if (isUrl && AUDIO_FILE_EXT_RE.test(query)) return fileSource.resolve(query);
@@ -70,5 +73,16 @@ export async function getPlayableStream(track: TrackInfo, signal: AbortSignal): 
       return soundcloudSource.getPlayableStream(track.url, signal);
     case "file":
       return fileSource.getPlayableStream(track.url, signal);
+    case "spotify":
+      return spotifySource.getPlayableStream(track, signal);
   }
+}
+
+/**
+ * Does a track's slow setup ahead of its turn, where its source has any: a
+ * Spotify song has to be matched to a YouTube upload before it can start.
+ * Best-effort - a failure shows up when the track actually plays.
+ */
+export function prefetch(track: TrackInfo) {
+  if (track.source === "spotify") spotifySource.prefetchMatch(track);
 }

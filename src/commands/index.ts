@@ -15,6 +15,9 @@ import clearFilters from "./clearFilters";
 import timescale from "./timescale";
 import bassboost from "./bassboost";
 import loop from "./loop";
+import autoplay from "./autoplay";
+import lyrics from "./lyrics";
+import livelyrics from "./livelyrics";
 import pause from "./pause";
 import shuffle from "./shuffle";
 import seek from "./seek";
@@ -39,6 +42,9 @@ const commands: ICommand[] = [
   shuffle,
   clearQueue,
   loop,
+  autoplay,
+  lyrics,
+  livelyrics,
   help,
   volume,
   clearFilters,

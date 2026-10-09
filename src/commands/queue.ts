@@ -1,23 +1,16 @@
 import {
-  ActionRowBuilder,
-  ButtonBuilder,
   ButtonInteraction,
-  ButtonStyle,
   ChatInputCommandInteraction,
-  ComponentType,
   EmbedBuilder,
-  MessageFlags,
   SlashCommandBuilder,
   escapeMarkdown,
 } from "discord.js";
 import { CONDITIONS, ICommand } from "../interfaces";
 import { getPlayerInstance } from "../services/player";
 import { TrackInfo } from "../services/trackSource";
-import { LOOP_MODE_LABELS, formatProgress, formatTitle, timeConvert2 } from "../util";
+import { LOOP_MODE_LABELS, formatProgress, formatTitle, replyWithPages, timeConvert2 } from "../util";
 
 const PAGE_SIZE = 10;
-// How long the page buttons keep working before they're removed
-const PAGE_BUTTONS_TIMEOUT_MS = 2 * 60_000;
 
 type Player = ReturnType<typeof getPlayerInstance>;
 
@@ -50,10 +43,15 @@ function renderPage(player: Player, page: number) {
     lines.push("**Up next**");
     queue.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).forEach((entry, i) => {
       const position = page * PAGE_SIZE + i + 1;
-      lines.push(`\`${position}.\` ${formatTitle(entry.track, 60)} \`${formatLength(entry.track)}\``);
+      const marker = entry.autoplay ? "📻 " : "";
+      lines.push(`\`${position}.\` ${marker}${formatTitle(entry.track, 60)} \`${formatLength(entry.track)}\``);
     });
   } else {
-    lines.push("Nothing queued up next - add songs with /play");
+    lines.push(
+      player.isAutoplayOn()
+        ? "Nothing queued up next - autoplay will pick a similar song"
+        : "Nothing queued up next - add songs with /play",
+    );
   }
 
   const totalMs = queue.reduce(
@@ -64,6 +62,7 @@ function renderPage(player: Player, page: number) {
     `${queue.length} song${queue.length === 1 ? "" : "s"} queued`,
     totalMs ? `${timeConvert2(totalMs)} total` : undefined,
     LOOP_MODE_LABELS[player.getLoopMode()],
+    player.isAutoplayOn() ? "📻 Autoplay on" : undefined,
     pages > 1 ? `Page ${page + 1}/${pages}` : undefined,
   ];
 
@@ -72,21 +71,7 @@ function renderPage(player: Player, page: number) {
     .setTitle("Queue")
     .setDescription(lines.join("\n"))
     .setFooter({ text: footer.filter(Boolean).join(" · ") });
-
-  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId("queue-previous")
-      .setEmoji("◀️")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(page === 0),
-    new ButtonBuilder()
-      .setCustomId("queue-next")
-      .setEmoji("▶️")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(page >= pages - 1),
-  );
-
-  return { embeds: [embed], components: pages > 1 ? [buttons] : [] };
+  return embed;
 }
 
 const command: ICommand = {
@@ -108,34 +93,7 @@ export async function showQueue(
   player: Player,
   options: { private?: boolean } = {},
 ) {
-  let page = 0;
-  // The queue can change between button presses, so re-clamp on every render
-  const render = () => {
-    page = Math.max(0, Math.min(page, pageCount(player) - 1));
-    return renderPage(player, page);
-  };
-
-  const response = await interaction.reply({
-    ...render(),
-    flags: options.private ? MessageFlags.Ephemeral : undefined,
-  });
-  if (pageCount(player) === 1) return;
-
-  const collector = response.createMessageComponentCollector({
-    componentType: ComponentType.Button,
-    time: PAGE_BUTTONS_TIMEOUT_MS,
-  });
-  collector.on("collect", async (button) => {
-    page += button.customId === "queue-next" ? 1 : -1;
-    await button
-      .update(render())
-      .catch((error) => console.error("Failed to change queue page:", error));
-  });
-  collector.on("end", () => {
-    interaction
-      .editReply({ components: [] })
-      .catch((error) => console.error("Failed to remove queue buttons:", error));
-  });
+  await replyWithPages(interaction, (page) => renderPage(player, page), () => pageCount(player), options);
 }
 
 export default command;

@@ -30,7 +30,14 @@ const progressBar = (positionMs: number, durationMs: number) => {
 
 export const createPlaybackEmbed = (
   track: TrackInfo,
-  status: { positionMs: number; paused: boolean; loopMode: LoopMode; volume: number },
+  status: {
+    positionMs: number;
+    paused: boolean;
+    loopMode: LoopMode;
+    volume: number;
+    autoplay: boolean;
+    liveLyrics: boolean;
+  },
 ) => {
   const lines: string[] = [];
   if (track.durationMs && !track.isLive) {
@@ -40,6 +47,8 @@ export const createPlaybackEmbed = (
 
   const details = [status.paused ? "⏸ Paused" : "▶ Playing"];
   if (status.loopMode !== "off") details.push(LOOP_MODE_LABELS[status.loopMode]);
+  if (status.autoplay) details.push("📻 Autoplay");
+  if (status.liveLyrics) details.push("🎤 Live lyrics");
   if (status.volume !== 1) details.push(`🔊 ${Math.round(status.volume * 100)}%`);
   lines.push(details.join(" · "));
 
@@ -94,7 +103,7 @@ export const createPlaylistEmbed = (tracks: TrackInfo[]) => {
   return embed;
 };
 
-export const createNowPlayingEmbed = (track: TrackInfo) => {
+export const createNowPlayingEmbed = (track: TrackInfo, footer?: string) => {
   const coverColor = "#ff0000";
   const embed = new EmbedBuilder()
     .setColor(coverColor)
@@ -109,5 +118,6 @@ export const createNowPlayingEmbed = (track: TrackInfo) => {
       },
     );
   if (track.thumbnail) embed.setImage(track.thumbnail);
+  if (footer) embed.setFooter({ text: footer });
   return embed;
 };

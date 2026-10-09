@@ -28,8 +28,9 @@ import {
   defaultFilterState,
   playbackTempo,
 } from "../util/ffmpegFilters";
+import { LiveLyrics } from "./liveLyrics";
 import { TrackDownload } from "./trackDownload";
-import { TrackInfo, getPlayableStream, prefetch } from "./trackSource";
+import { TrackInfo, findRelatedTrack, getPlayableStream, prefetch } from "./trackSource";
 
 const players = new Collection<string, PlayerManager>();
 const pendingPlayers = new Map<string, Promise<PlayerManager>>();
@@ -56,10 +57,13 @@ interface PipelineInput {
 export class TrackExt {
   track: TrackInfo;
   queuedFromChannelId?: string;
+  // Picked by autoplay rather than queued by someone
+  autoplay: boolean;
 
-  constructor(track: TrackInfo, queuedFromChannelId?: string) {
+  constructor(track: TrackInfo, queuedFromChannelId?: string, autoplay = false) {
     this.track = track;
     this.queuedFromChannelId = queuedFromChannelId;
+    this.autoplay = autoplay;
   }
 }
 
@@ -163,6 +167,14 @@ class PlayerManager {
   private history: TrackExt[] = [];
   // The message whose buttons control this player (see setControlsMessage)
   private controlsMessage?: Message;
+  // Autoplay: off until turned on, for as long as the bot stays connected
+  private autoplay = false;
+  // Bumped to cancel a pick still being found (see fillAutoplay)
+  private autoplayToken = 0;
+  private autoplayInFlight = false;
+  // Live lyrics: off until turned on, then one message per song (see LiveLyrics)
+  private liveLyricsOn = false;
+  private liveLyrics?: LiveLyrics;
   private loopMode: LoopMode = "off";
   private currentTrack?: TrackExt;
   private timeoutId: NodeJS.Timeout | null = null;
@@ -246,6 +258,7 @@ class PlayerManager {
     this.discardDownload();
     // Nothing left for the buttons to control (the queue ran out, or /stop)
     this.clearControls();
+    this.stopLiveLyrics();
     this.stopping = true;
     this.audioPlayer.stop(true);
     this.stopping = false;
@@ -350,12 +363,14 @@ class PlayerManager {
     if (this.destroyed) return;
     this.destroyed = true;
     this.playGeneration++;
+    this.autoplayToken++;
     this.stopMonitoring();
     clearTimeout(this.aloneTimeoutId);
     this.input?.close();
     this.ffmpeg?.destroy();
     this.discardDownload();
     this.clearControls();
+    this.stopLiveLyrics();
     this.audioPlayer.stop(true);
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
       this.connection.destroy();
@@ -387,6 +402,9 @@ class PlayerManager {
    * Adds a new track into the queue and starts playback if the queue was empty
    */
   async queueTrack(track: TrackExt) {
+    // Someone queued music themselves, so autoplay's pending pick makes way.
+    // It picks again once their songs run out.
+    this.cancelAutoplay();
     this.queue.push(track);
     if (!this.currentTrack) await this.nextTrack({ sendEmbed: true });
     // Queued straight into the up-next spot while something plays
@@ -399,11 +417,12 @@ class PlayerManager {
 
   setLoopMode(mode: LoopMode) {
     this.loopMode = mode;
+    this.fillAutoplay();
   }
 
   /** Off → song → queue → off */
   cycleLoopMode() {
-    this.loopMode = NEXT_LOOP_MODE[this.loopMode];
+    this.setLoopMode(NEXT_LOOP_MODE[this.loopMode]);
     return this.loopMode;
   }
 
@@ -424,6 +443,7 @@ class PlayerManager {
 
   removeFromQueue(position: number) {
     const [removed] = this.queue.splice(this.toQueueIndex(position), 1);
+    this.fillAutoplay();
     return removed;
   }
 
@@ -439,11 +459,13 @@ class PlayerManager {
   clearQueue() {
     const removed = this.queue.length;
     this.queue = [];
+    this.fillAutoplay();
     return removed;
   }
 
   /** Stops playback and empties the queue, staying in the voice channel */
   stop() {
+    this.cancelAutoplay();
     this.queue = [];
     this.currentTrack = undefined;
     this.pausedAt = undefined;
@@ -516,7 +538,102 @@ class PlayerManager {
   }
 
   getControlsState() {
-    return { paused: this.isPaused(), loopMode: this.loopMode };
+    return { paused: this.isPaused(), loopMode: this.loopMode, autoplay: this.autoplay };
+  }
+
+  isLiveLyricsOn() {
+    return this.liveLyricsOn;
+  }
+
+  setLiveLyrics(on: boolean) {
+    this.liveLyricsOn = on;
+    if (on) this.startLiveLyrics();
+    else this.stopLiveLyrics();
+  }
+
+  toggleLiveLyrics() {
+    this.setLiveLyrics(!this.liveLyricsOn);
+    return this.liveLyricsOn;
+  }
+
+  /** Replaces the previous song's live lyrics with the current song's, if they're on */
+  private startLiveLyrics() {
+    this.stopLiveLyrics();
+    if (!this.liveLyricsOn || !this.currentTrack) return;
+    const channel = this.getAnnouncementChannel(this.currentTrack);
+    if (!channel) return;
+    this.liveLyrics = new LiveLyrics(this.currentTrack.track, channel, () => this.getPositionMs());
+  }
+
+  private stopLiveLyrics() {
+    this.liveLyrics?.stop();
+    this.liveLyrics = undefined;
+  }
+
+  isAutoplayOn() {
+    return this.autoplay;
+  }
+
+  setAutoplay(on: boolean) {
+    this.autoplay = on;
+    if (on) this.fillAutoplay();
+    else this.cancelAutoplay();
+  }
+
+  toggleAutoplay() {
+    this.setAutoplay(!this.autoplay);
+    return this.autoplay;
+  }
+
+  /** Drops autoplay's queued pick, and any pick still being found */
+  private cancelAutoplay() {
+    this.autoplayToken++;
+    this.autoplayInFlight = false;
+    this.queue = this.queue.filter((track) => !track.autoplay);
+  }
+
+  /**
+   * While autoplay is on, keeps a song related to the last one queued once
+   * nothing else is. It's found while the last song still plays, so it's
+   * ready without a gap; if the queue already ran dry, it starts as soon as
+   * it's found.
+   */
+  private fillAutoplay() {
+    if (!this.autoplay || this.autoplayInFlight || this.destroyed) return;
+    // Looping never runs out of songs
+    if (this.loopMode !== "off" || this.queue.length > 0) return;
+    const recent = [...this.history, ...(this.currentTrack ? [this.currentTrack] : [])];
+    const last = recent.at(-1);
+    if (!last) return;
+    // Picks follow the last song someone queued themselves, working down its
+    // radio, rather than each pick seeding the next and drifting away from
+    // what they were listening to. The latest pick takes over once it runs out.
+    const anchor = recent.findLast((track) => !track.autoplay) ?? last;
+
+    const token = ++this.autoplayToken;
+    this.autoplayInFlight = true;
+    findRelatedTrack(
+      [...new Set([anchor, last])].map((track) => track.track),
+      recent.map((track) => track.track),
+    )
+      .then(async (track) => {
+        // Cancelled meanwhile (autoplay turned off, /stop, songs queued)
+        if (token !== this.autoplayToken) return;
+        this.autoplayInFlight = false;
+        if (!track) throw new Error(`Nothing related to "${anchor.track.title}" was found`);
+        this.queue.push(new TrackExt(track, anchor.queuedFromChannelId, true));
+        if (!this.currentTrack) await this.nextTrack({ sendEmbed: true });
+      })
+      .catch((error) => {
+        if (token !== this.autoplayToken) return;
+        this.autoplayInFlight = false;
+        console.error(`[guild ${this.guildId}] Autoplay couldn't pick a song:`, error);
+        // Only worth a message once the music has actually stopped
+        if (this.currentTrack) return;
+        this.getAnnouncementChannel(anchor)
+          ?.send({ embeds: [createMessageEmbed("📻 Autoplay couldn't find anything to play next")] })
+          .catch(() => {});
+      });
   }
 
   /**
@@ -565,6 +682,8 @@ class PlayerManager {
       // Nothing left to resume, so the next /play shouldn't start out paused
       this.pausedAt = undefined;
       this.startMonitoring();
+      // Normally a pick is already queued by now; this covers it not being ready yet
+      this.fillAutoplay();
       return;
     }
     this.stopMonitoring();
@@ -573,8 +692,12 @@ class PlayerManager {
     if (options.sendEmbed && this.currentTrack !== previousTrack) {
       this.announceNowPlaying(this.currentTrack);
     }
+    // A looping song keeps its live lyrics, which follow it back to the start
+    if (this.currentTrack !== previousTrack) this.startLiveLyrics();
     // Gets the next track ready while this one plays (see trackSource.prefetch)
     if (this.queue[0]) prefetch(this.queue[0].track);
+    // The last queued song just started: time for autoplay to pick what's next
+    this.fillAutoplay();
 
     const track = this.currentTrack;
     try {
@@ -599,7 +722,7 @@ class PlayerManager {
   private announceNowPlaying(track: TrackExt) {
     this.getAnnouncementChannel(track)
       ?.send({
-        embeds: [createNowPlayingEmbed(track.track)],
+        embeds: [createNowPlayingEmbed(track.track, track.autoplay ? "📻 Picked by autoplay" : undefined)],
         components: createPlayerControls(this.getControlsState()),
       })
       .then((message) => {

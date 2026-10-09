@@ -95,5 +95,10 @@ export async function handlePlayerControl(interaction: ButtonInteraction) {
       await showQueue(interaction, player, { private: true });
       return;
     }
+    case "autoplay": {
+      const on = player.toggleAutoplay();
+      await note(on ? "📻 Autoplay turned on" : "📻 Autoplay turned off");
+      return;
+    }
   }
 }

@@ -13,7 +13,8 @@ export type PlayerControl =
   | "loop"
   | "shuffle"
   | "stop"
-  | "queue";
+  | "queue"
+  | "autoplay";
 
 const LOOP_LABELS: Record<LoopMode, string> = {
   off: "Loop off",
@@ -28,7 +29,11 @@ const button = (control: PlayerControl, emoji: string, style = ButtonStyle.Secon
     .setStyle(style);
 
 /** The playback buttons under a now-playing message, reflecting the player's state */
-export const createPlayerControls = (state: { paused: boolean; loopMode: LoopMode }) => [
+export const createPlayerControls = (state: {
+  paused: boolean;
+  loopMode: LoopMode;
+  autoplay: boolean;
+}) => [
   new ActionRowBuilder<ButtonBuilder>().addComponents(
     button("back", "⏮️"),
     button("rewind", "⏪"),
@@ -42,5 +47,7 @@ export const createPlayerControls = (state: { paused: boolean; loopMode: LoopMod
     button("shuffle", "🔀"),
     button("stop", "⏹️", ButtonStyle.Danger),
     button("queue", "📜").setLabel("Queue"),
+    button("autoplay", "📻", state.autoplay ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setLabel(state.autoplay ? "Autoplay on" : "Autoplay off"),
   ),
 ];

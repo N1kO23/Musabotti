@@ -263,6 +263,11 @@ export async function search(query: string, limit: number): Promise<TrackInfo[]>
 const VERSION_LABEL_RE =
   /\s+-\s+[^-]*\b(remaster(ed)?|mono|stereo|single version|album version|radio edit)\b.*$/i;
 const FEATURING_RE = /\s*[([](feat|ft|with)\.?\s[^)\]]*[)\]]/gi;
+
+/** A song title without version labels and featured-artist credits */
+export const cleanSongTitle = (title: string) =>
+  title.replace(VERSION_LABEL_RE, "").replace(FEATURING_RE, "").trim();
+
 // How far a plain YouTube result's length may be from the song's to count as it
 const LENGTH_TOLERANCE_S = 3;
 
@@ -296,7 +301,7 @@ export async function findSong(
   artist: string,
   durationMs: number,
 ): Promise<string | undefined> {
-  const cleanTitle = title.replace(VERSION_LABEL_RE, "").replace(FEATURING_RE, "").trim();
+  const cleanTitle = cleanSongTitle(title);
   const mainArtist = artist.split(",")[0].trim();
 
   try {
@@ -342,6 +347,64 @@ export async function findSong(
     .sort((a, b) => a.off - b.off);
   const pick = sameLength[0] ?? sameTitle[0];
   return pick && watchUrl(pick.entry);
+}
+
+const VIDEO_ID_RE = /(?:[?&]v=|youtu\.be\/|\/shorts\/)([\w-]{11})/;
+
+export const videoIdOf = (url: string) => url.match(VIDEO_ID_RE)?.[1];
+
+/**
+ * Songs related to a video, most related first: YouTube Music's song radio
+ * for it, the same mix its "Start radio" plays. The radio starts with the
+ * video itself, which is left out, as are live streams.
+ */
+export async function findRelated(videoId: string): Promise<TrackInfo[]> {
+  const entries = parseEntries(
+    await runYtDlpResilient([
+      "-j",
+      "--flat-playlist",
+      "--playlist-end",
+      "25",
+      "--no-warnings",
+      `https://music.youtube.com/watch?v=${videoId}&list=RDAMVM${videoId}`,
+    ]),
+  );
+  return entries
+    .filter((entry) => entry.id !== videoId && entry.duration)
+    .map((entry) => ({ ...toTrackInfo(entry), url: watchUrl(entry) }));
+}
+
+/**
+ * The parts of a title that name the song: YouTube titles are often "Artist
+ * - Song (Official Video)", Spotify's "Song - 2004 Remaster". Bracketed
+ * notes are dropped, and so is a part that's just the artist's name.
+ */
+const songNameParts = (track: TrackInfo) => {
+  const artist = normalizeTitle(track.author);
+  return track.title
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, "")
+    .split(" - ")
+    .map(normalizeTitle)
+    .filter((part) => part && part !== artist);
+};
+
+/** An artist or channel name without spacing and the "VEVO"/"Official"/"- Topic" channel suffixes */
+const artistKey = (name: string) =>
+  normalizeTitle(name)
+    .replace(/\s+/g, "")
+    .replace(/(vevo|official|topic)$/, "");
+
+export function isSameArtist(a: TrackInfo, b: TrackInfo) {
+  const aKey = artistKey(a.author);
+  return Boolean(aKey) && aKey === artistKey(b.author);
+}
+
+/** Whether two tracks are the same song, e.g. a Spotify song and its YouTube music video */
+export function isSameSong(a: TrackInfo, b: TrackInfo) {
+  const aId = videoIdOf(a.url);
+  if (aId && aId === videoIdOf(b.url)) return true;
+  const bParts = songNameParts(b);
+  return songNameParts(a).some((part) => bParts.includes(part));
 }
 
 /**

@@ -86,3 +86,52 @@ export async function getPlayableStream(track: TrackInfo, signal: AbortSignal): 
 export function prefetch(track: TrackInfo) {
   if (track.source === "spotify") spotifySource.prefetchMatch(track);
 }
+
+/**
+ * The YouTube video a track's related songs are looked up from: the track
+ * itself for YouTube, its match for Spotify, a search for SoundCloud. Direct
+ * files have nothing to look up by.
+ */
+async function youtubeIdFor(track: TrackInfo): Promise<string | undefined> {
+  switch (track.source) {
+    case "youtube":
+      return ytSource.videoIdOf(track.url);
+    case "spotify": {
+      const url = await spotifySource.findMatch(track);
+      return url && ytSource.videoIdOf(url);
+    }
+    case "soundcloud": {
+      const url = await ytSource.findSong(track.title, track.author, track.durationMs);
+      return url && ytSource.videoIdOf(url);
+    }
+    case "file":
+      return undefined;
+  }
+}
+
+// Autoplay prefers an artist other than these last few songs'
+const RECENT_ARTISTS = 2;
+
+/**
+ * Autoplay's next pick: the song most related to the first of `seeds` that
+ * has one left - not one of `recent` (the same song in another upload counts
+ * as played too). An artist other than the last few songs' is preferred, so
+ * consecutive picks don't all come from one artist.
+ */
+export async function findRelatedTrack(
+  seeds: TrackInfo[],
+  recent: TrackInfo[],
+): Promise<TrackInfo | undefined> {
+  const recentArtists = recent.slice(-RECENT_ARTISTS);
+  for (const seed of seeds) {
+    const videoId = await youtubeIdFor(seed);
+    if (!videoId) continue;
+    const related = await ytSource.findRelated(videoId);
+    const unplayed = related.filter((candidate) => !recent.some((track) => ytSource.isSameSong(track, candidate)));
+    const pick =
+      unplayed.find((candidate) => !recentArtists.some((track) => ytSource.isSameArtist(track, candidate))) ??
+      unplayed[0];
+    if (pick) return pick;
+  }
+  return undefined;
+}

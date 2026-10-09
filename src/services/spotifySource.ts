@@ -137,7 +137,8 @@ export async function resolve(query: string): Promise<ResolveResult> {
 // play of the same song share one search.
 const matchCache = new Map<string, Promise<string | undefined>>();
 
-function findMatch(track: TrackInfo): Promise<string | undefined> {
+/** A song's YouTube upload, or undefined if none was found */
+export function findMatch(track: TrackInfo): Promise<string | undefined> {
   const cached = matchCache.get(track.url);
   if (cached) return cached;
 

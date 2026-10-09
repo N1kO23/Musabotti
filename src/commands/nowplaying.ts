@@ -20,6 +20,8 @@ const command: ICommand = {
       paused: player.isPaused(),
       loopMode: player.getLoopMode(),
       volume: player.getVolume(),
+      autoplay: player.isAutoplayOn(),
+      liveLyrics: player.isLiveLyricsOn(),
     });
     const response = await interaction.reply({
       embeds: [embed],
